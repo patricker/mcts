@@ -125,6 +125,9 @@ pub mod tree_policy;
 pub use search_tree::*;
 use {transposition_table::*, tree_policy::*};
 
+use rand::{rngs::SmallRng, Rng, SeedableRng};
+use std::cell::RefCell;
+
 use {
 	atomics::*,
 	std::{sync::Arc, thread::JoinHandle, time::Duration},
@@ -141,6 +144,13 @@ pub trait MCTS: Sized + Send + Sync + 'static {
 
 	fn virtual_loss(&self) -> i64 {
 		0
+	}
+	/// Default value for unvisited children during selection.
+	/// `f64::INFINITY` (default) forces all children to be tried before any revisit.
+	/// Set to a finite value (e.g. `0.0`) for neural-network-guided search where
+	/// the prior should control which children are explored first.
+	fn fpu_value(&self) -> f64 {
+		f64::INFINITY
 	}
 	fn visits_before_expansion(&self) -> u64 {
 		1
@@ -160,6 +170,25 @@ pub trait MCTS: Sized + Send + Sync + 'static {
 	/// when exceeded, the current node is evaluated as a leaf.
 	fn max_playout_depth(&self) -> usize {
 		usize::MAX
+	}
+	/// Optional RNG seed for deterministic search. When set, each thread gets
+	/// a reproducible RNG seeded from `seed + thread_id`.
+	fn rng_seed(&self) -> Option<u64> {
+		None
+	}
+	/// Dirichlet noise for root exploration during self-play.
+	/// Returns `Some((epsilon, alpha))` where noisy prior =
+	/// `(1 - epsilon) * prior + epsilon * Dir(alpha)`.
+	/// Typical: eps=0.25, alpha=0.03 (Go), alpha=0.3 (Chess).
+	/// Only applies when TreePolicy::MoveEvaluation supports noise (e.g. f64).
+	fn dirichlet_noise(&self) -> Option<(f64, f64)> {
+		None
+	}
+	/// Temperature for post-search move selection in `best_move()`.
+	/// 0.0 (default) = argmax by visits. 1.0 = proportional to visits.
+	/// `principal_variation()` always uses argmax regardless of temperature.
+	fn selection_temperature(&self) -> f64 {
+		0.0
 	}
 	fn on_backpropagation(&self, _evaln: &StateEvaluation<Self>, _handle: SearchHandle<Self>) {}
 	fn cycle_behaviour(&self) -> CycleBehaviour<Self> {
@@ -213,6 +242,7 @@ where
 	}
 }
 
+
 pub type MoveEvaluation<Spec> = <<Spec as MCTS>::TreePolicy as TreePolicy<Spec>>::MoveEvaluation;
 pub type StateEvaluation<Spec> = <<Spec as MCTS>::Eval as Evaluator<Spec>>::StateEvaluation;
 pub type Move<Spec> = <<Spec as MCTS>::State as GameState>::Move;
@@ -263,6 +293,7 @@ pub struct MCTSManager<Spec: MCTS> {
 	// thread local data when we have no asynchronous workers
 	single_threaded_tld: Option<ThreadDataFull<Spec>>,
 	print_on_playout_error: bool,
+	selection_rng: RefCell<SmallRng>,
 }
 
 impl<Spec: MCTS> MCTSManager<Spec>
@@ -276,12 +307,17 @@ where
 		tree_policy: Spec::TreePolicy,
 		table: Spec::TranspositionTable,
 	) -> Self {
+		let selection_rng = match manager.rng_seed() {
+			Some(seed) => SmallRng::seed_from_u64(seed.wrapping_add(u64::MAX / 2)),
+			None => SmallRng::from_rng(rand::thread_rng()).unwrap(),
+		};
 		let search_tree = Arc::new(SearchTree::new(state, manager, tree_policy, eval, table));
 		let single_threaded_tld = None;
 		Self {
 			search_tree,
 			single_threaded_tld,
 			print_on_playout_error: true,
+			selection_rng: RefCell::new(selection_rng),
 		}
 	}
 
@@ -293,7 +329,7 @@ where
 	pub fn playout(&mut self) {
 		// Avoid overhead of thread creation
 		if self.single_threaded_tld.is_none() {
-			self.single_threaded_tld = Some(Default::default());
+			self.single_threaded_tld = Some(self.search_tree.make_thread_data());
 		}
 		self.search_tree.playout(self.single_threaded_tld.as_mut().unwrap());
 	}
@@ -352,7 +388,7 @@ where
 		std::thread::scope(|s| {
 			for _ in 0..num_threads {
 				s.spawn(|| {
-					let mut tld = Default::default();
+					let mut tld = search_tree.make_thread_data();
 					loop {
 						if stop_signal.load(Ordering::SeqCst) {
 							break;
@@ -383,7 +419,7 @@ where
 		std::thread::scope(|s| {
 			for _ in 0..num_threads {
 				s.spawn(|| {
-					let mut tld = Default::default();
+					let mut tld = search_tree.make_thread_data();
 					loop {
 						let count = counter.fetch_sub(1, Ordering::SeqCst);
 						if count <= 0 {
@@ -420,7 +456,35 @@ where
 		&self.search_tree
 	}
 	pub fn best_move(&self) -> Option<Move<Spec>> {
-		self.principal_variation(1).get(0).map(|x| x.clone())
+		let temperature = self.search_tree.spec().selection_temperature();
+		if temperature < 1e-8 {
+			self.principal_variation(1).get(0).cloned()
+		} else {
+			self.select_move_by_temperature(temperature)
+		}
+	}
+
+	fn select_move_by_temperature(&self, temperature: f64) -> Option<Move<Spec>> {
+		let inv_temp = 1.0 / temperature;
+		let weighted: Vec<_> = self
+			.search_tree
+			.root_node()
+			.moves()
+			.filter(|c| c.visits() > 0)
+			.map(|c| (c.get_move().clone(), (c.visits() as f64).powf(inv_temp)))
+			.collect();
+		if weighted.is_empty() {
+			return None;
+		}
+		let total: f64 = weighted.iter().map(|(_, w)| w).sum();
+		let mut roll: f64 = self.selection_rng.borrow_mut().gen::<f64>() * total;
+		for (mov, weight) in &weighted {
+			roll -= weight;
+			if roll <= 0.0 {
+				return Some(mov.clone());
+			}
+		}
+		Some(weighted.last().unwrap().0.clone())
 	}
 	pub fn perf_test<F>(&mut self, num_threads: usize, mut f: F)
 	where
@@ -441,10 +505,15 @@ where
 	pub fn reset(self) -> Self {
 		let search_tree = Arc::try_unwrap(self.search_tree)
 			.unwrap_or_else(|_| panic!("Cannot reset while async search is running"));
+		let selection_rng = match search_tree.spec().rng_seed() {
+			Some(seed) => SmallRng::seed_from_u64(seed.wrapping_add(u64::MAX / 2)),
+			None => SmallRng::from_rng(rand::thread_rng()).unwrap(),
+		};
 		Self {
 			search_tree: Arc::new(search_tree.reset()),
 			print_on_playout_error: self.print_on_playout_error,
 			single_threaded_tld: None,
+			selection_rng: RefCell::new(selection_rng),
 		}
 	}
 }
@@ -556,7 +625,7 @@ where
 	ThreadData<Spec>: Default,
 {
 	std::thread::spawn(move || {
-		let mut tld = Default::default();
+		let mut tld = search_tree.make_thread_data();
 		loop {
 			if stop_signal.load(Ordering::SeqCst) {
 				break;

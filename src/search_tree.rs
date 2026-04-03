@@ -1,3 +1,5 @@
+use rand::{rngs::SmallRng, SeedableRng};
+
 use {
 	super::*,
 	atomics::*,
@@ -22,6 +24,7 @@ pub struct SearchTree<Spec: MCTS> {
 	manager: Spec,
 
 	num_nodes: AtomicUsize,
+	thread_counter: AtomicUsize,
 	orphaned: Mutex<Vec<Box<SearchNode<Spec>>>>,
 	transposition_table_hits: AtomicUsize,
 	delayed_transposition_table_hits: AtomicUsize,
@@ -76,6 +79,10 @@ impl<Spec: MCTS> MoveInfo<Spec> {
 
 	pub fn move_evaluation(&self) -> &MoveEvaluation<Spec> {
 		&self.move_evaluation
+	}
+
+	pub(crate) fn set_move_evaluation(&mut self, eval: MoveEvaluation<Spec>) {
+		self.move_evaluation = eval;
 	}
 
 	pub fn visits(&self) -> u64 {
@@ -192,7 +199,14 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		eval: Spec::Eval,
 		table: Spec::TranspositionTable,
 	) -> Self {
-		let root_node = create_node(&eval, &tree_policy, &state, None);
+		let mut root_node = create_node(&eval, &tree_policy, &state, None);
+		if let Some((epsilon, alpha)) = manager.dirichlet_noise() {
+			let mut rng = match manager.rng_seed() {
+				Some(seed) => SmallRng::seed_from_u64(seed.wrapping_add(u64::MAX)),
+				None => SmallRng::from_rng(rand::thread_rng()).unwrap(),
+			};
+			tree_policy.apply_dirichlet_noise(&mut root_node.moves, epsilon, alpha, &mut rng);
+		}
 		Self {
 			root_state: state,
 			root_node,
@@ -201,11 +215,26 @@ impl<Spec: MCTS> SearchTree<Spec> {
 			eval,
 			table,
 			num_nodes: 1.into(),
+			thread_counter: 0.into(),
 			orphaned: Mutex::new(Vec::new()),
 			transposition_table_hits: 0.into(),
 			delayed_transposition_table_hits: 0.into(),
 			expansion_contention_events: 0.into(),
 		}
+	}
+
+	/// Create thread-local data, seeded if the MCTS config provides a seed.
+	pub fn make_thread_data(&self) -> ThreadDataFull<Spec>
+	where
+		ThreadData<Spec>: Default,
+	{
+		let mut tld = ThreadDataFull::<Spec>::default();
+		if let Some(base_seed) = self.manager.rng_seed() {
+			let thread_id = self.thread_counter.fetch_add(1, Ordering::Relaxed) as u64;
+			self.tree_policy
+				.seed_thread_data(&mut tld.tld.policy_data, base_seed.wrapping_add(thread_id));
+		}
+		tld
 	}
 
 	pub fn reset(self) -> Self {
@@ -548,6 +577,16 @@ where
 
 		// Swap in the new root, get the old one
 		let old_root = std::mem::replace(&mut self.root_node, new_root);
+
+		// Apply Dirichlet noise to the new root's priors
+		if let Some((epsilon, alpha)) = self.manager.dirichlet_noise() {
+			let mut rng = match self.manager.rng_seed() {
+				Some(seed) => SmallRng::seed_from_u64(seed.wrapping_add(u64::MAX)),
+				None => SmallRng::from_rng(rand::thread_rng()).unwrap(),
+			};
+			self.tree_policy
+				.apply_dirichlet_noise(&mut self.root_node.moves, epsilon, alpha, &mut rng);
+		}
 
 		// Clear transposition table before dropping old root (prevent dangling pointers)
 		self.table.clear();

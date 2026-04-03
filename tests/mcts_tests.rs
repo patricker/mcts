@@ -869,3 +869,374 @@ fn test_progressive_widening_with_advance_root() {
 	mcts.playout_n(5000);
 	assert!(mcts.best_move().is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Seeded RNG tests
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct SeededMCTS;
+
+impl MCTS for SeededMCTS {
+	type State = CountingGame;
+	type Eval = MyEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+
+	fn rng_seed(&self) -> Option<u64> {
+		Some(42)
+	}
+}
+
+#[test]
+fn test_seeded_rng_deterministic() {
+	let run = || {
+		let mut mcts = MCTSManager::new(
+			CountingGame(0),
+			SeededMCTS,
+			MyEvaluator,
+			UCTPolicy::new(0.5),
+			(),
+		);
+		mcts.playout_n(1000);
+		let stats = mcts.root_child_stats();
+		(
+			stats.iter().find(|s| s.mov == Move::Add).unwrap().visits,
+			stats.iter().find(|s| s.mov == Move::Sub).unwrap().visits,
+		)
+	};
+
+	let (add1, sub1) = run();
+	let (add2, sub2) = run();
+	assert_eq!(add1, add2, "Seeded search should be deterministic");
+	assert_eq!(sub1, sub2, "Seeded search should be deterministic");
+}
+
+#[test]
+fn test_unseeded_rng_still_works() {
+	let mut mcts = make_no_transposition_mcts();
+	mcts.playout_n(5000);
+	assert_eq!(mcts.best_move().unwrap(), Move::Add);
+}
+
+// ---------------------------------------------------------------------------
+// FPU tests
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct FpuMCTS;
+
+impl MCTS for FpuMCTS {
+	type State = CountingGame;
+	type Eval = MyEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+
+	fn fpu_value(&self) -> f64 {
+		0.0
+	}
+	fn max_playout_depth(&self) -> usize {
+		20
+	}
+}
+
+#[derive(Default)]
+struct AlphaGoFpuMCTS;
+
+impl MCTS for AlphaGoFpuMCTS {
+	type State = CountingGame;
+	type Eval = AlphaGoEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = AlphaGoPolicy;
+	type TranspositionTable = ();
+
+	fn fpu_value(&self) -> f64 {
+		0.0
+	}
+	fn max_playout_depth(&self) -> usize {
+		20
+	}
+}
+
+impl Evaluator<AlphaGoFpuMCTS> for AlphaGoEvaluator {
+	type StateEvaluation = i64;
+
+	fn evaluate_new_state(
+		&self,
+		state: &CountingGame,
+		moves: &Vec<Move>,
+		_: Option<SearchHandle<AlphaGoFpuMCTS>>,
+	) -> (Vec<f64>, i64) {
+		let n = moves.len();
+		let prior = if n > 0 { 1.0 / n as f64 } else { 0.0 };
+		(vec![prior; n], state.0)
+	}
+	fn interpret_evaluation_for_player(&self, evaln: &i64, _: &()) -> i64 {
+		*evaln
+	}
+	fn evaluate_existing_state(
+		&self,
+		_: &CountingGame,
+		evaln: &i64,
+		_: SearchHandle<AlphaGoFpuMCTS>,
+	) -> i64 {
+		*evaln
+	}
+}
+
+#[test]
+fn test_fpu_finds_correct_move() {
+	let mut mcts = MCTSManager::new(
+		CountingGame(0),
+		FpuMCTS,
+		MyEvaluator,
+		UCTPolicy::new(0.5),
+		(),
+	);
+	mcts.playout_n(10000);
+	assert_eq!(mcts.best_move().unwrap(), Move::Add);
+}
+
+#[test]
+fn test_fpu_alphago_finds_correct_move() {
+	let mut mcts = MCTSManager::new(
+		CountingGame(0),
+		AlphaGoFpuMCTS,
+		AlphaGoEvaluator,
+		AlphaGoPolicy::new(0.5),
+		(),
+	);
+	mcts.playout_n(10000);
+	assert_eq!(mcts.best_move().unwrap(), Move::Add);
+}
+
+#[test]
+fn test_fpu_default_is_infinity() {
+	let mcts = NoTranspositionMCTS;
+	assert!(mcts.fpu_value().is_infinite());
+}
+
+// ---------------------------------------------------------------------------
+// Dirichlet noise tests
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct NoisyAlphaGoMCTS;
+
+impl MCTS for NoisyAlphaGoMCTS {
+	type State = CountingGame;
+	type Eval = AlphaGoEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = AlphaGoPolicy;
+	type TranspositionTable = ();
+
+	fn dirichlet_noise(&self) -> Option<(f64, f64)> {
+		Some((0.25, 0.3))
+	}
+	fn rng_seed(&self) -> Option<u64> {
+		Some(42)
+	}
+}
+
+impl Evaluator<NoisyAlphaGoMCTS> for AlphaGoEvaluator {
+	type StateEvaluation = i64;
+
+	fn evaluate_new_state(
+		&self,
+		state: &CountingGame,
+		moves: &Vec<Move>,
+		_: Option<SearchHandle<NoisyAlphaGoMCTS>>,
+	) -> (Vec<f64>, i64) {
+		let n = moves.len();
+		let prior = if n > 0 { 1.0 / n as f64 } else { 0.0 };
+		(vec![prior; n], state.0)
+	}
+	fn interpret_evaluation_for_player(&self, evaln: &i64, _: &()) -> i64 {
+		*evaln
+	}
+	fn evaluate_existing_state(
+		&self,
+		_: &CountingGame,
+		evaln: &i64,
+		_: SearchHandle<NoisyAlphaGoMCTS>,
+	) -> i64 {
+		*evaln
+	}
+}
+
+#[test]
+fn test_dirichlet_noise_changes_priors() {
+	let mcts = MCTSManager::new(
+		CountingGame(0),
+		NoisyAlphaGoMCTS,
+		AlphaGoEvaluator,
+		AlphaGoPolicy::new(0.5),
+		(),
+	);
+	let stats = mcts.root_child_stats();
+	// Original priors are 0.5/0.5. Noise should shift them.
+	let first = stats[0].move_evaluation;
+	assert!(
+		(first - 0.5).abs() > 1e-6,
+		"Dirichlet noise should change priors, got {}",
+		first
+	);
+}
+
+#[test]
+fn test_dirichlet_noise_deterministic_with_seed() {
+	let get_priors = || {
+		let mcts = MCTSManager::new(
+			CountingGame(0),
+			NoisyAlphaGoMCTS,
+			AlphaGoEvaluator,
+			AlphaGoPolicy::new(0.5),
+			(),
+		);
+		let stats = mcts.root_child_stats();
+		(stats[0].move_evaluation, stats[1].move_evaluation)
+	};
+	let (a1, b1) = get_priors();
+	let (a2, b2) = get_priors();
+	assert_eq!(a1, a2, "Seeded Dirichlet noise should be deterministic");
+	assert_eq!(b1, b2, "Seeded Dirichlet noise should be deterministic");
+}
+
+#[test]
+fn test_dirichlet_noise_sums_to_one() {
+	let mcts = MCTSManager::new(
+		CountingGame(0),
+		NoisyAlphaGoMCTS,
+		AlphaGoEvaluator,
+		AlphaGoPolicy::new(0.5),
+		(),
+	);
+	let stats = mcts.root_child_stats();
+	let sum: f64 = stats.iter().map(|s| s.move_evaluation).sum();
+	assert!(
+		(sum - 1.0).abs() < 0.01,
+		"Noisy priors should sum to ~1.0, got {}",
+		sum
+	);
+}
+
+#[test]
+fn test_dirichlet_noise_noop_for_uct() {
+	// UCT uses MoveEvaluation = (), noise should be a no-op
+	let mut mcts = MCTSManager::new(
+		CountingGame(0),
+		SeededMCTS,
+		MyEvaluator,
+		UCTPolicy::new(0.5),
+		(),
+	);
+	mcts.playout_n(5000);
+	assert_eq!(mcts.best_move().unwrap(), Move::Add);
+}
+
+#[test]
+fn test_dirichlet_noise_still_finds_correct_move() {
+	let mut mcts = MCTSManager::new(
+		CountingGame(0),
+		NoisyAlphaGoMCTS,
+		AlphaGoEvaluator,
+		AlphaGoPolicy::new(0.5),
+		(),
+	);
+	mcts.playout_n(10000);
+	assert_eq!(mcts.best_move().unwrap(), Move::Add);
+}
+
+// ---------------------------------------------------------------------------
+// Temperature selection tests
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct TemperatureMCTS;
+
+impl MCTS for TemperatureMCTS {
+	type State = CountingGame;
+	type Eval = MyEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+
+	fn selection_temperature(&self) -> f64 {
+		1.0
+	}
+	fn rng_seed(&self) -> Option<u64> {
+		Some(42)
+	}
+}
+
+#[test]
+fn test_temperature_zero_is_argmax() {
+	// Default temperature (0.0) should always pick most-visited = Add
+	let mut mcts = make_no_transposition_mcts();
+	mcts.playout_n(5000);
+	assert_eq!(mcts.best_move().unwrap(), Move::Add);
+}
+
+#[test]
+fn test_temperature_one_mostly_picks_best() {
+	let mut mcts = MCTSManager::new(
+		CountingGame(0),
+		TemperatureMCTS,
+		MyEvaluator,
+		UCTPolicy::new(0.5),
+		(),
+	);
+	mcts.playout_n(10000);
+	// With temperature 1.0, selection is proportional to visits.
+	// Add has way more visits, so it should be picked most of the time.
+	let mut add_count = 0;
+	for _ in 0..100 {
+		if mcts.best_move().unwrap() == Move::Add {
+			add_count += 1;
+		}
+	}
+	assert!(
+		add_count > 80,
+		"Temperature 1.0 should mostly pick Add (got {}/100)",
+		add_count
+	);
+}
+
+#[test]
+fn test_temperature_does_not_affect_pv() {
+	let mut mcts = MCTSManager::new(
+		CountingGame(0),
+		TemperatureMCTS,
+		MyEvaluator,
+		UCTPolicy::new(0.5),
+		(),
+	);
+	mcts.playout_n(10000);
+	// PV always uses argmax regardless of temperature
+	assert_eq!(mcts.principal_variation(1), vec![Move::Add]);
+}
+
+#[test]
+fn test_temperature_deterministic_with_seed() {
+	let run = || {
+		let mut mcts = MCTSManager::new(
+			CountingGame(0),
+			TemperatureMCTS,
+			MyEvaluator,
+			UCTPolicy::new(0.5),
+			(),
+		);
+		mcts.playout_n(5000);
+		(0..10).map(|_| mcts.best_move().unwrap()).collect::<Vec<_>>()
+	};
+	let seq1 = run();
+	let seq2 = run();
+	assert_eq!(seq1, seq2, "Seeded temperature selection should be deterministic");
+}

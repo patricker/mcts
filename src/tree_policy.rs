@@ -1,4 +1,4 @@
-use rand::{rngs::ThreadRng, Rng};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 use super::*;
 use search_tree::*;
@@ -12,6 +12,10 @@ pub trait TreePolicy<Spec: MCTS<TreePolicy = Self>>: Sync + Sized {
 		MoveIter: Iterator<Item = &'a MoveInfo<Spec>> + Clone;
 	fn validate_evaluations(&self, _evalns: &[Self::MoveEvaluation]) {}
 
+	/// Seed the thread-local data for deterministic search.
+	/// Called when the MCTS config provides an `rng_seed()`.
+	fn seed_thread_data(&self, _tld: &mut Self::ThreadLocalData, _seed: u64) {}
+
 	/// Compare two move evaluations for ordering during progressive widening.
 	/// Higher-priority moves should sort first (return `Greater` for higher priority `a`).
 	/// Default: `Equal` (no reordering).
@@ -21,6 +25,17 @@ pub trait TreePolicy<Spec: MCTS<TreePolicy = Self>>: Sync + Sized {
 		_b: &Self::MoveEvaluation,
 	) -> std::cmp::Ordering {
 		std::cmp::Ordering::Equal
+	}
+
+	/// Apply Dirichlet noise to root move evaluations for self-play exploration.
+	/// Default: no-op (appropriate when MoveEvaluation is not numeric).
+	fn apply_dirichlet_noise(
+		&self,
+		_moves: &mut [MoveInfo<Spec>],
+		_epsilon: f64,
+		_alpha: f64,
+		_rng: &mut SmallRng,
+	) {
 	}
 }
 
@@ -92,6 +107,7 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for UCTPolicy {
 		let total_visits = moves.clone().map(|x| x.visits()).sum::<u64>();
 		let adjusted_total = (total_visits + 1) as f64;
 		let ln_adjusted_total = adjusted_total.ln();
+		let fpu = handle.mcts().fpu_value();
 		handle
 			.thread_data()
 			.policy_data
@@ -100,7 +116,7 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for UCTPolicy {
 				let child_visits = mov.visits();
 				// http://mcts.ai/pubs/mcts-survey-master.pdf
 				if child_visits == 0 {
-					std::f64::INFINITY
+					fpu
 				} else {
 					let explore_term = 2.0 * (ln_adjusted_total / child_visits as f64).sqrt();
 					let mean_action_value = sum_rewards as f64 / child_visits as f64;
@@ -108,6 +124,10 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for UCTPolicy {
 				}
 			})
 			.unwrap()
+	}
+
+	fn seed_thread_data(&self, tld: &mut PolicyRng, seed: u64) {
+		*tld = PolicyRng::seeded(seed);
 	}
 }
 
@@ -122,14 +142,19 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for AlphaGoPolicy {
 		let total_visits = moves.clone().map(|x| x.visits()).sum::<u64>() + 1;
 		let sqrt_total_visits = (total_visits as f64).sqrt();
 		let explore_coef = self.exploration_constant * sqrt_total_visits;
+		let fpu = handle.mcts().fpu_value();
 		handle
 			.thread_data()
 			.policy_data
 			.select_by_key(moves, |mov| {
-				let sum_rewards = mov.sum_rewards() as f64;
 				let child_visits = mov.visits();
-				let policy_evaln = *mov.move_evaluation() as f64;
-				(sum_rewards + explore_coef * policy_evaln) * self.reciprocal(child_visits as usize)
+				if child_visits == 0 && fpu.is_finite() {
+					fpu
+				} else {
+					let sum_rewards = mov.sum_rewards() as f64;
+					let policy_evaln = *mov.move_evaluation() as f64;
+					(sum_rewards + explore_coef * policy_evaln) * self.reciprocal(child_visits as usize)
+				}
 			})
 			.unwrap()
 	}
@@ -151,17 +176,97 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for AlphaGoPolicy {
 	fn compare_move_evaluations(&self, a: &f64, b: &f64) -> std::cmp::Ordering {
 		b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
 	}
+
+	fn seed_thread_data(&self, tld: &mut PolicyRng, seed: u64) {
+		*tld = PolicyRng::seeded(seed);
+	}
+
+	fn apply_dirichlet_noise(
+		&self,
+		moves: &mut [MoveInfo<Spec>],
+		epsilon: f64,
+		alpha: f64,
+		rng: &mut SmallRng,
+	) {
+		if moves.is_empty() {
+			return;
+		}
+		let noise = sample_dirichlet(rng, alpha, moves.len());
+		for (mi, &n) in moves.iter_mut().zip(noise.iter()) {
+			let prior = *mi.move_evaluation();
+			mi.set_move_evaluation((1.0 - epsilon) * prior + epsilon * n);
+		}
+	}
+}
+
+/// Sample from Gamma(alpha, 1) using Marsaglia-Tsang with Ahrens-Dieter boost for alpha < 1.
+fn sample_gamma(rng: &mut SmallRng, alpha: f64) -> f64 {
+	if alpha < 1.0 {
+		// Ahrens-Dieter boost: Gamma(alpha) = Gamma(alpha+1) * U^(1/alpha)
+		let u: f64 = rng.gen();
+		return sample_gamma(rng, alpha + 1.0) * u.powf(1.0 / alpha);
+	}
+	// Marsaglia-Tsang method for alpha >= 1
+	let d = alpha - 1.0 / 3.0;
+	let c = 1.0 / (9.0 * d).sqrt();
+	loop {
+		let x: f64 = loop {
+			let x: f64 = rng.gen::<f64>() * 2.0 - 1.0; // uniform(-1, 1)
+			// Approximate normal via ratio of uniforms (Box-Muller is overkill here)
+			let y: f64 = rng.gen::<f64>() * 2.0 - 1.0;
+			let r2 = x * x + y * y;
+			if r2 > 0.0 && r2 < 1.0 {
+				break x * (-2.0 * r2.ln() / r2).sqrt();
+			}
+		};
+		let v = (1.0 + c * x).powi(3);
+		if v <= 0.0 {
+			continue;
+		}
+		let u: f64 = rng.gen();
+		if u < 1.0 - 0.0331 * (x * x) * (x * x) {
+			return d * v;
+		}
+		if u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
+			return d * v;
+		}
+	}
+}
+
+/// Sample from symmetric Dirichlet(alpha, ..., alpha) with n components.
+fn sample_dirichlet(rng: &mut SmallRng, alpha: f64, n: usize) -> Vec<f64> {
+	let mut samples: Vec<f64> = (0..n).map(|_| sample_gamma(rng, alpha)).collect();
+	let sum: f64 = samples.iter().sum();
+	if sum > 0.0 {
+		for s in &mut samples {
+			*s /= sum;
+		}
+	} else {
+		// Fallback to uniform if all gamma samples are zero
+		let uniform = 1.0 / n as f64;
+		for s in &mut samples {
+			*s = uniform;
+		}
+	}
+	samples
 }
 
 #[derive(Clone)]
 pub struct PolicyRng {
-	rng: ThreadRng,
+	rng: SmallRng,
 }
 
 impl PolicyRng {
 	pub fn new() -> Self {
-		let rng = rand::thread_rng();
-		Self { rng }
+		Self {
+			rng: SmallRng::from_rng(rand::thread_rng()).unwrap(),
+		}
+	}
+
+	pub fn seeded(seed: u64) -> Self {
+		Self {
+			rng: SmallRng::seed_from_u64(seed),
+		}
 	}
 
 	pub fn select_by_key<T, Iter, KeyFn>(&mut self, elts: Iter, mut key_fn: KeyFn) -> Option<T>
