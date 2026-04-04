@@ -1873,6 +1873,456 @@ fn test_solver_existing_tests_unaffected() {
 }
 
 // ---------------------------------------------------------------------------
+// MCTS-Solver Draw tests
+// ---------------------------------------------------------------------------
+
+// MicroGame: a configurable two-player game with hardcoded tree structure
+// for testing ProvenValue::Draw propagation end-to-end.
+//
+// Game tree (states are u8 identifiers):
+//
+// Scenario 1 — Pure draw (root=10):
+//   10 → {11, 12}   both terminal Draw
+//
+// Scenario 2 — Win trumps draw (root=20):
+//   20 → {21, 22}   21=terminal Loss (parent wins), 22=terminal Draw
+//
+// Scenario 3 — Loss+draw = draw (root=30):
+//   30 → {31, 32}   31=terminal Win (parent loses), 32=terminal Draw
+//
+// Scenario 4 — Multi-level draw propagation (root=40):
+//   40 → {41, 42}
+//   41 → {43, 44}   43=terminal Win (bad for 41), 44=terminal Draw
+//   42 → {45, 46}   45=terminal Win (bad for 42), 46=terminal Draw
+//   Both 41,42 resolve to Draw → 40 resolves to Draw
+
+#[derive(Clone, Debug, PartialEq)]
+struct MicroGame {
+	state: u8,
+	current_player: NimPlayer,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MicroMove(u8); // target state
+
+impl std::fmt::Display for MicroMove {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		write!(f, "→{}", self.0)
+	}
+}
+
+impl GameState for MicroGame {
+	type Move = MicroMove;
+	type Player = NimPlayer;
+	type MoveList = Vec<MicroMove>;
+
+	fn current_player(&self) -> NimPlayer {
+		self.current_player
+	}
+
+	fn available_moves(&self) -> Vec<MicroMove> {
+		match self.state {
+			10 => vec![MicroMove(11), MicroMove(12)],
+			20 => vec![MicroMove(21), MicroMove(22)],
+			30 => vec![MicroMove(31), MicroMove(32)],
+			40 => vec![MicroMove(41), MicroMove(42)],
+			41 => vec![MicroMove(43), MicroMove(44)],
+			42 => vec![MicroMove(45), MicroMove(46)],
+			_ => vec![], // terminal
+		}
+	}
+
+	fn make_move(&mut self, mov: &MicroMove) {
+		self.state = mov.0;
+		self.current_player = match self.current_player {
+			NimPlayer::P1 => NimPlayer::P2,
+			NimPlayer::P2 => NimPlayer::P1,
+		};
+	}
+
+	fn terminal_value(&self) -> Option<ProvenValue> {
+		// Values from the perspective of current_player at terminal node
+		match self.state {
+			// Scenario 1: pure draw
+			11 | 12 => Some(ProvenValue::Draw),
+			// Scenario 2: 21=Loss (current player lost), 22=Draw
+			21 => Some(ProvenValue::Loss),
+			22 => Some(ProvenValue::Draw),
+			// Scenario 3: 31=Win (current player won), 32=Draw
+			31 => Some(ProvenValue::Win),
+			32 => Some(ProvenValue::Draw),
+			// Scenario 4: 43,45=Win (current player won=bad for parent), 44,46=Draw
+			43 | 45 => Some(ProvenValue::Win),
+			44 | 46 => Some(ProvenValue::Draw),
+			_ => None,
+		}
+	}
+}
+
+struct MicroEvaluator;
+
+impl Evaluator<DrawSolverMCTS> for MicroEvaluator {
+	type StateEvaluation = i64;
+
+	fn evaluate_new_state(
+		&self,
+		_state: &MicroGame,
+		moves: &Vec<MicroMove>,
+		_: Option<SearchHandle<DrawSolverMCTS>>,
+	) -> (Vec<()>, i64) {
+		(vec![(); moves.len()], 0)
+	}
+
+	fn interpret_evaluation_for_player(&self, evaln: &i64, _: &NimPlayer) -> i64 {
+		*evaln
+	}
+
+	fn evaluate_existing_state(
+		&self,
+		_: &MicroGame,
+		evaln: &i64,
+		_: SearchHandle<DrawSolverMCTS>,
+	) -> i64 {
+		*evaln
+	}
+}
+
+#[derive(Default)]
+struct DrawSolverMCTS;
+
+impl MCTS for DrawSolverMCTS {
+	type State = MicroGame;
+	type Eval = MicroEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+
+	fn solver_enabled(&self) -> bool {
+		true
+	}
+	fn rng_seed(&self) -> Option<u64> {
+		Some(42)
+	}
+}
+
+fn make_draw_solver(state: u8) -> MCTSManager<DrawSolverMCTS> {
+	MCTSManager::new(
+		MicroGame {
+			state,
+			current_player: NimPlayer::P1,
+		},
+		DrawSolverMCTS,
+		MicroEvaluator,
+		UCTPolicy::new(1.0),
+		(),
+	)
+}
+
+#[test]
+fn test_solver_draw_pure_all_draws() {
+	let mut mcts = make_draw_solver(10);
+	mcts.playout_n(50);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Draw);
+}
+
+#[test]
+fn test_solver_draw_win_trumps_draw() {
+	let mut mcts = make_draw_solver(20);
+	mcts.playout_n(50);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Win);
+	// best_move should pick the winning move (→21, which is Loss for opponent)
+	let best = mcts.best_move().unwrap();
+	assert_eq!(best, MicroMove(21));
+}
+
+#[test]
+fn test_solver_draw_loss_plus_draw_is_draw() {
+	let mut mcts = make_draw_solver(30);
+	mcts.playout_n(50);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Draw);
+	// best_move should pick the draw (→32), not the losing move (→31)
+	let best = mcts.best_move().unwrap();
+	assert_eq!(best, MicroMove(32));
+}
+
+#[test]
+fn test_solver_draw_propagation_two_levels() {
+	let mut mcts = make_draw_solver(40);
+	mcts.playout_n(200);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Draw);
+}
+
+#[test]
+fn test_solver_draw_proven_root_stops_search() {
+	let mut mcts = make_draw_solver(10);
+	mcts.playout_n(50);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Draw);
+	let nodes_after = mcts.tree().num_nodes();
+
+	mcts.playout_n(1000);
+	assert_eq!(
+		mcts.tree().num_nodes(),
+		nodes_after,
+		"Proven Draw root should not grow the tree"
+	);
+}
+
+#[test]
+fn test_solver_draw_child_stats_proven_values() {
+	let mut mcts = make_draw_solver(30);
+	mcts.playout_n(50);
+	let stats = mcts.root_child_stats();
+	let to_31 = stats.iter().find(|s| s.mov == MicroMove(31)).unwrap();
+	let to_32 = stats.iter().find(|s| s.mov == MicroMove(32)).unwrap();
+	// State 31 is Win from child's perspective (bad for parent)
+	assert_eq!(to_31.proven_value, ProvenValue::Win);
+	// State 32 is Draw
+	assert_eq!(to_32.proven_value, ProvenValue::Draw);
+}
+
+#[test]
+fn test_solver_draw_parallel_correctness() {
+	let mut mcts = make_draw_solver(40);
+	mcts.playout_n_parallel(500, 4);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Draw);
+}
+
+// ---------------------------------------------------------------------------
+// Score-Bounded MCTS tests
+// ---------------------------------------------------------------------------
+
+// ScoreGame: a two-player game with hardcoded terminal scores for testing
+// Score-Bounded MCTS. Scores are from current_player's perspective.
+//
+// Scenario A — depth 1 (root=0):
+//   0 (P1) → {1, 2}
+//   1 (P2): terminal, score=10  → parent sees -10
+//   2 (P2): terminal, score=-5  → parent sees 5
+//   P1 picks move→2 (score 5). Root bounds: [5, 5].
+//
+// Scenario B — depth 1, both negative (root=10):
+//   10 (P1) → {11, 12}
+//   11 (P2): terminal, score=3   → parent sees -3
+//   12 (P2): terminal, score=7   → parent sees -7
+//   P1 picks move→11 (score -3). Root bounds: [-3, -3].
+//
+// Scenario C — depth 2 (root=20):
+//   20 (P1) → {21, 22}
+//   21 (P2) → {23, 24}
+//   22 (P2): terminal, score=0   → parent sees 0
+//   23 (P1): terminal, score=8   → state 21 (P2) sees -8
+//   24 (P1): terminal, score=-3  → state 21 (P2) sees 3
+//   State 21 (P2): picks max(-8, 3) = 3. Bounds [3, 3].
+//   State 20 (P1): picks max(-3, 0) = 0. Root bounds: [0, 0].
+
+#[derive(Clone, Debug, PartialEq)]
+struct ScoreGame {
+	state: u8,
+	current_player: NimPlayer,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ScoreMove(u8);
+
+impl std::fmt::Display for ScoreMove {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		write!(f, "→{}", self.0)
+	}
+}
+
+impl GameState for ScoreGame {
+	type Move = ScoreMove;
+	type Player = NimPlayer;
+	type MoveList = Vec<ScoreMove>;
+
+	fn current_player(&self) -> NimPlayer {
+		self.current_player
+	}
+
+	fn available_moves(&self) -> Vec<ScoreMove> {
+		match self.state {
+			0 => vec![ScoreMove(1), ScoreMove(2)],
+			10 => vec![ScoreMove(11), ScoreMove(12)],
+			20 => vec![ScoreMove(21), ScoreMove(22)],
+			21 => vec![ScoreMove(23), ScoreMove(24)],
+			_ => vec![], // terminal
+		}
+	}
+
+	fn make_move(&mut self, mov: &ScoreMove) {
+		self.state = mov.0;
+		self.current_player = match self.current_player {
+			NimPlayer::P1 => NimPlayer::P2,
+			NimPlayer::P2 => NimPlayer::P1,
+		};
+	}
+
+	fn terminal_score(&self) -> Option<i32> {
+		match self.state {
+			1 => Some(10),
+			2 => Some(-5),
+			11 => Some(3),
+			12 => Some(7),
+			22 => Some(0),
+			23 => Some(8),
+			24 => Some(-3),
+			_ => None,
+		}
+	}
+}
+
+struct ScoreEvaluator;
+
+impl Evaluator<ScoreBoundedMCTS> for ScoreEvaluator {
+	type StateEvaluation = i64;
+
+	fn evaluate_new_state(
+		&self,
+		_state: &ScoreGame,
+		moves: &Vec<ScoreMove>,
+		_: Option<SearchHandle<ScoreBoundedMCTS>>,
+	) -> (Vec<()>, i64) {
+		(vec![(); moves.len()], 0)
+	}
+
+	fn interpret_evaluation_for_player(&self, evaln: &i64, _: &NimPlayer) -> i64 {
+		*evaln
+	}
+
+	fn evaluate_existing_state(
+		&self,
+		_: &ScoreGame,
+		evaln: &i64,
+		_: SearchHandle<ScoreBoundedMCTS>,
+	) -> i64 {
+		*evaln
+	}
+}
+
+#[derive(Default)]
+struct ScoreBoundedMCTS;
+
+impl MCTS for ScoreBoundedMCTS {
+	type State = ScoreGame;
+	type Eval = ScoreEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+
+	fn score_bounded_enabled(&self) -> bool {
+		true
+	}
+	fn rng_seed(&self) -> Option<u64> {
+		Some(42)
+	}
+}
+
+fn make_score_bounded(state: u8) -> MCTSManager<ScoreBoundedMCTS> {
+	MCTSManager::new(
+		ScoreGame {
+			state,
+			current_player: NimPlayer::P1,
+		},
+		ScoreBoundedMCTS,
+		ScoreEvaluator,
+		UCTPolicy::new(1.0),
+		(),
+	)
+}
+
+#[test]
+fn test_score_bounded_terminal_exact() {
+	// Depth-1 tree: both children are terminals with known scores
+	let mut mcts = make_score_bounded(0);
+	mcts.playout_n(50);
+	let bounds = mcts.root_score_bounds();
+	// P1 picks child with -child_score = max(-10, 5) = 5
+	assert_eq!(bounds, ScoreBounds::exact(5));
+}
+
+#[test]
+fn test_score_bounded_best_move_selection() {
+	let mut mcts = make_score_bounded(0);
+	mcts.playout_n(50);
+	// P1 should pick move→2 (score 5 from P1's view)
+	let best = mcts.best_move().unwrap();
+	assert_eq!(best, ScoreMove(2));
+}
+
+#[test]
+fn test_score_bounded_all_negative() {
+	// Both children give negative value to P1
+	let mut mcts = make_score_bounded(10);
+	mcts.playout_n(50);
+	let bounds = mcts.root_score_bounds();
+	// P1 picks max(-3, -7) = -3
+	assert_eq!(bounds, ScoreBounds::exact(-3));
+	assert_eq!(mcts.best_move().unwrap(), ScoreMove(11));
+}
+
+#[test]
+fn test_score_bounded_two_levels() {
+	let mut mcts = make_score_bounded(20);
+	mcts.playout_n(200);
+	let bounds = mcts.root_score_bounds();
+	// Root value = 0 (P1 picks move→22)
+	assert_eq!(bounds, ScoreBounds::exact(0));
+	assert_eq!(mcts.best_move().unwrap(), ScoreMove(22));
+}
+
+#[test]
+fn test_score_bounded_proven_root_stops_search() {
+	let mut mcts = make_score_bounded(0);
+	mcts.playout_n(50);
+	assert!(mcts.root_score_bounds().is_proven());
+	let nodes_after = mcts.tree().num_nodes();
+
+	mcts.playout_n(1000);
+	assert_eq!(
+		mcts.tree().num_nodes(),
+		nodes_after,
+		"Proven root (converged bounds) should not grow the tree"
+	);
+}
+
+#[test]
+fn test_score_bounded_child_stats() {
+	let mut mcts = make_score_bounded(0);
+	mcts.playout_n(50);
+	let stats = mcts.root_child_stats();
+	let to_1 = stats.iter().find(|s| s.mov == ScoreMove(1)).unwrap();
+	let to_2 = stats.iter().find(|s| s.mov == ScoreMove(2)).unwrap();
+	// Child 1 has score 10 from P2 perspective
+	assert_eq!(to_1.score_bounds, ScoreBounds::exact(10));
+	// Child 2 has score -5 from P2 perspective
+	assert_eq!(to_2.score_bounds, ScoreBounds::exact(-5));
+}
+
+#[test]
+fn test_score_bounded_parallel_correctness() {
+	let mut mcts = make_score_bounded(20);
+	mcts.playout_n_parallel(500, 4);
+	let bounds = mcts.root_score_bounds();
+	assert_eq!(bounds, ScoreBounds::exact(0));
+}
+
+#[test]
+fn test_score_bounded_disabled_by_default() {
+	let mcts = NoTranspositionMCTS;
+	assert!(!mcts.score_bounded_enabled());
+}
+
+#[test]
+fn test_score_bounded_unbounded_without_feature() {
+	// When score_bounded_enabled is false, bounds should stay unbounded
+	let mut mcts = make_no_transposition_mcts();
+	mcts.playout_n(100);
+	assert_eq!(mcts.root_score_bounds(), ScoreBounds::UNBOUNDED);
+}
+
+// ---------------------------------------------------------------------------
 // Chance node tests
 // ---------------------------------------------------------------------------
 

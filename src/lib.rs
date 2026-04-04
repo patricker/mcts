@@ -1,6 +1,6 @@
-//! This is a library for Monte Carlo tree search.
+//! A high-performance, lock-free Monte Carlo Tree Search library.
 //!
-//! It is still under development and the documentation isn't good. However, the following example may be helpful:
+//! The following example demonstrates basic usage:
 //!
 //! ```
 //! use mcts::{transposition_table::*, tree_policy::*, *};
@@ -136,6 +136,8 @@ use {
 	vec_storage_reuse::VecStorageForReuse,
 };
 
+/// Configuration trait for MCTS search. Defines the game, evaluator,
+/// tree policy, and optional features.
 pub trait MCTS: Sized + Send + Sync + 'static {
 	type State: GameState + Send + Sync + 'static;
 	type Eval: Evaluator<Self> + Send + 'static;
@@ -144,6 +146,7 @@ pub trait MCTS: Sized + Send + Sync + 'static {
 	type TranspositionTable: TranspositionTable<Self> + Send + 'static;
 	type ExtraThreadData: 'static;
 
+	/// Virtual loss for parallel search. Subtracted during descent, added back during backprop.
 	fn virtual_loss(&self) -> i64 {
 		0
 	}
@@ -154,12 +157,15 @@ pub trait MCTS: Sized + Send + Sync + 'static {
 	fn fpu_value(&self) -> f64 {
 		f64::INFINITY
 	}
+	/// Minimum visits to a leaf before expanding it into a tree node.
 	fn visits_before_expansion(&self) -> u64 {
 		1
 	}
+	/// Maximum number of tree nodes. Search stops when reached.
 	fn node_limit(&self) -> usize {
 		usize::MAX
 	}
+	/// Select the best child after search completes. Override for custom post-search selection.
 	fn select_child_after_search<'a>(&self, children: &'a [MoveInfo<Self>]) -> &'a MoveInfo<Self> {
 		if self.solver_enabled() {
 			// Prefer proven-win children (child's Loss = parent's win)
@@ -169,6 +175,21 @@ pub trait MCTS: Sized + Send + Sync + 'static {
 			// Prefer proven-draw over proven-loss
 			if let Some(drawer) = children.iter().find(|c| c.child_proven_value() == ProvenValue::Draw) {
 				return drawer;
+			}
+		}
+		if self.score_bounded_enabled() {
+			// Pick the child with the best guaranteed score from parent's perspective.
+			// Parent's lower from child = negate(child.upper).
+			let best_lower = children
+				.iter()
+				.map(|c| negate_bound(c.child_score_bounds().upper))
+				.max()
+				.unwrap_or(i32::MIN);
+			if best_lower > i32::MIN {
+				return children
+					.iter()
+					.max_by_key(|c| negate_bound(c.child_score_bounds().upper))
+					.unwrap();
 			}
 		}
 		children.iter().max_by_key(|child| child.visits()).unwrap()
@@ -209,7 +230,19 @@ pub trait MCTS: Sized + Send + Sync + 'static {
 	fn solver_enabled(&self) -> bool {
 		false
 	}
+	/// Enable Score-Bounded MCTS: each node tracks `[lower, upper]` bounds
+	/// on its minimax value (from the current player's perspective).
+	/// Bounds tighten during backpropagation using negamax. When bounds
+	/// converge (`lower == upper`), the node's exact value is proven.
+	/// Requires `GameState::terminal_score()` to set leaf bounds.
+	/// Independent of `solver_enabled()` — both can be active simultaneously.
+	/// Default: false.
+	fn score_bounded_enabled(&self) -> bool {
+		false
+	}
+	/// Called during backpropagation for each node on the playout path.
 	fn on_backpropagation(&self, _evaln: &StateEvaluation<Self>, _handle: SearchHandle<Self>) {}
+	/// How to handle cycles caused by transposition tables.
 	fn cycle_behaviour(&self) -> CycleBehaviour<Self> {
 		if std::mem::size_of::<Self::TranspositionTable>() == 0 {
 			CycleBehaviour::Ignore
@@ -219,6 +252,7 @@ pub trait MCTS: Sized + Send + Sync + 'static {
 	}
 }
 
+/// Thread-local data passed to tree policy and user code during search.
 pub struct ThreadData<Spec: MCTS> {
 	pub policy_data: TreePolicyThreadData<Spec>,
 	pub extra_data: Spec::ExtraThreadData,
@@ -264,11 +298,17 @@ where
 }
 
 
+/// Per-move evaluation from the tree policy (e.g., `()` for UCT, `f64` prior for AlphaGo).
 pub type MoveEvaluation<Spec> = <<Spec as MCTS>::TreePolicy as TreePolicy<Spec>>::MoveEvaluation;
+/// State evaluation produced by the `Evaluator`.
 pub type StateEvaluation<Spec> = <<Spec as MCTS>::Eval as Evaluator<Spec>>::StateEvaluation;
+/// The move type for the game state.
 pub type Move<Spec> = <<Spec as MCTS>::State as GameState>::Move;
+/// The move list type returned by `GameState::available_moves()`.
 pub type MoveList<Spec> = <<Spec as MCTS>::State as GameState>::MoveList;
+/// The player type for the game state.
 pub type Player<Spec> = <<Spec as MCTS>::State as GameState>::Player;
+/// Thread-local data for the tree policy.
 pub type TreePolicyThreadData<Spec> = <<Spec as MCTS>::TreePolicy as TreePolicy<Spec>>::ThreadLocalData;
 
 /// Game-theoretic proven value for MCTS-Solver.
@@ -283,6 +323,7 @@ pub enum ProvenValue {
 }
 
 impl ProvenValue {
+	/// Convert from raw u8 representation. Unknown for unrecognized values.
 	pub fn from_u8(v: u8) -> Self {
 		match v {
 			1 => ProvenValue::Win,
@@ -293,13 +334,54 @@ impl ProvenValue {
 	}
 }
 
+/// Proven score interval for Score-Bounded MCTS.
+/// Tracks `[lower, upper]` bounds on the true minimax value from the
+/// current player's perspective. When `lower == upper`, the value is exact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScoreBounds {
+	pub lower: i32,
+	pub upper: i32,
+}
+
+impl ScoreBounds {
+	/// No bounds known: `[i32::MIN, i32::MAX]`.
+	pub const UNBOUNDED: Self = Self {
+		lower: i32::MIN,
+		upper: i32::MAX,
+	};
+
+	/// Exact proven value: `lower == upper == v`.
+	pub fn exact(v: i32) -> Self {
+		Self { lower: v, upper: v }
+	}
+
+	/// Returns `true` when bounds have converged (`lower == upper`).
+	pub fn is_proven(&self) -> bool {
+		self.lower == self.upper
+	}
+}
+
+/// Negate a score bound, mapping sentinels correctly.
+/// `i32::MIN` (unbounded below) becomes `i32::MAX` (unbounded above) and vice versa.
+pub(crate) fn negate_bound(v: i32) -> i32 {
+	match v {
+		i32::MIN => i32::MAX,
+		i32::MAX => i32::MIN,
+		_ => -v,
+	}
+}
+
+/// Defines the game rules: available moves, state transitions, and players.
 pub trait GameState: Clone {
 	type Move: Sync + Send + Clone;
 	type Player: Sync;
 	type MoveList: std::iter::IntoIterator<Item = Self::Move>;
 
+	/// The player whose turn it is.
 	fn current_player(&self) -> Self::Player;
+	/// Legal moves from this state. Empty means terminal.
 	fn available_moves(&self) -> Self::MoveList;
+	/// Apply a move, mutating the state in place.
 	fn make_move(&mut self, mov: &Self::Move);
 
 	/// Maximum children to expand at this node given the current visit count.
@@ -319,6 +401,14 @@ pub trait GameState: Clone {
 		None
 	}
 
+	/// When the state is terminal, return its exact minimax score from the
+	/// current player's perspective. Used by Score-Bounded MCTS to set
+	/// exact bounds on terminal nodes.
+	/// Default: `None` (score bounds are not set on terminals).
+	fn terminal_score(&self) -> Option<i32> {
+		None
+	}
+
 	/// If the current state requires a chance event (dice roll, card draw)
 	/// before the next player decision, return the possible outcomes with
 	/// their probabilities. Outcomes are applied via `make_move()`.
@@ -335,9 +425,12 @@ pub trait GameState: Clone {
 	}
 }
 
+/// Evaluates game states for the search. Produces state evaluations
+/// and per-move evaluations.
 pub trait Evaluator<Spec: MCTS>: Sync {
 	type StateEvaluation: Sync + Send;
 
+	/// Evaluate a newly expanded state. Returns per-move evaluations and a state evaluation.
 	fn evaluate_new_state(
 		&self,
 		state: &Spec::State,
@@ -345,6 +438,7 @@ pub trait Evaluator<Spec: MCTS>: Sync {
 		handle: Option<SearchHandle<Spec>>,
 	) -> (Vec<MoveEvaluation<Spec>>, Self::StateEvaluation);
 
+	/// Re-evaluate a previously seen state (e.g., for open-loop chance nodes).
 	fn evaluate_existing_state(
 		&self,
 		state: &Spec::State,
@@ -352,9 +446,12 @@ pub trait Evaluator<Spec: MCTS>: Sync {
 		handle: SearchHandle<Spec>,
 	) -> Self::StateEvaluation;
 
+	/// Convert a state evaluation to a reward from the given player's perspective.
 	fn interpret_evaluation_for_player(&self, evaluation: &Self::StateEvaluation, player: &Player<Spec>) -> i64;
 }
 
+/// Main entry point for running MCTS search. Owns the search tree and provides
+/// methods for running playouts and extracting results.
 pub struct MCTSManager<Spec: MCTS> {
 	search_tree: Arc<SearchTree<Spec>>,
 	// thread local data when we have no asynchronous workers
@@ -367,6 +464,8 @@ impl<Spec: MCTS> MCTSManager<Spec>
 where
 	ThreadData<Spec>: Default,
 {
+	/// Create a new search manager with the given game state, config, evaluator,
+	/// tree policy, and transposition table.
 	pub fn new(
 		state: Spec::State,
 		manager: Spec,
@@ -393,6 +492,7 @@ where
 		self
 	}
 
+	/// Run a single playout (single-threaded).
 	pub fn playout(&mut self) {
 		// Avoid overhead of thread creation
 		if self.single_threaded_tld.is_none() {
@@ -405,11 +505,13 @@ where
 			self.playout();
 		}
 	}
+	/// Run `n` playouts sequentially.
 	pub fn playout_n(&mut self, n: u64) {
 		for _ in 0..n {
 			self.playout();
 		}
 	}
+	/// Start asynchronous parallel search. Returns a handle that stops search on drop.
 	pub fn playout_parallel_async<'a>(&'a mut self, num_threads: usize) -> AsyncSearch<'a, Spec> {
 		assert!(num_threads != 0);
 		let stop_signal = Arc::new(AtomicBool::new(false));
@@ -428,6 +530,7 @@ where
 			threads,
 		}
 	}
+	/// Like `playout_parallel_async`, but takes ownership of the manager.
 	pub fn into_playout_parallel_async(self, num_threads: usize) -> AsyncSearchOwned<Spec> {
 		assert!(num_threads != 0);
 		let self_box = Box::new(self);
@@ -447,6 +550,7 @@ where
 			threads,
 		}
 	}
+	/// Run parallel search for the given duration using scoped threads.
 	pub fn playout_parallel_for(&mut self, duration: Duration, num_threads: usize) {
 		assert!(num_threads != 0);
 		let stop_signal = AtomicBool::new(false);
@@ -476,6 +580,7 @@ where
 			stop_signal.store(true, Ordering::SeqCst);
 		});
 	}
+	/// Run `n` playouts across multiple threads using scoped threads.
 	pub fn playout_n_parallel(&mut self, n: u32, num_threads: usize) {
 		if n == 0 {
 			return;
@@ -498,9 +603,11 @@ where
 			}
 		});
 	}
+	/// The principal variation with full move info handles.
 	pub fn principal_variation_info(&self, num_moves: usize) -> Vec<MoveInfoHandle<'_, Spec>> {
 		self.search_tree.principal_variation(num_moves)
 	}
+	/// The best sequence of moves found by search.
 	pub fn principal_variation(&self, num_moves: usize) -> Vec<Move<Spec>> {
 		self.search_tree
 			.principal_variation(num_moves)
@@ -508,6 +615,7 @@ where
 			.map(|x| x.get_move().clone())
 			.collect()
 	}
+	/// The principal variation as a sequence of game states.
 	pub fn principal_variation_states(&self, num_moves: usize) -> Vec<Spec::State> {
 		let moves = self.principal_variation(num_moves);
 		let mut states = vec![self.search_tree.root_state().clone()];
@@ -518,6 +626,7 @@ where
 		}
 		states
 	}
+	/// Access the underlying search tree.
 	pub fn tree(&self) -> &SearchTree<Spec> {
 		&self.search_tree
 	}
@@ -525,6 +634,11 @@ where
 	pub fn root_proven_value(&self) -> ProvenValue {
 		self.search_tree.root_proven_value()
 	}
+	/// Returns the score bounds of the root node (for Score-Bounded MCTS).
+	pub fn root_score_bounds(&self) -> ScoreBounds {
+		self.search_tree.root_score_bounds()
+	}
+	/// The best move found. Uses temperature-based selection if configured.
 	pub fn best_move(&self) -> Option<Move<Spec>> {
 		let temperature = self.search_tree.spec().selection_temperature();
 		if temperature < 1e-8 {
@@ -556,6 +670,7 @@ where
 		}
 		Some(weighted.last().unwrap().0.clone())
 	}
+	/// Run a 10-second performance benchmark, calling `f` with nodes/sec each second.
 	pub fn perf_test<F>(&mut self, num_threads: usize, mut f: F)
 	where
 		F: FnMut(usize),
@@ -572,6 +687,7 @@ where
 	pub fn perf_test_to_stderr(&mut self, num_threads: usize) {
 		self.perf_test(num_threads, |x| eprintln!("{} nodes/sec", thousands_separate(x)));
 	}
+	/// Reset the search tree, keeping the same game state and configuration.
 	pub fn reset(self) -> Self {
 		let search_tree = Arc::try_unwrap(self.search_tree)
 			.unwrap_or_else(|_| panic!("Cannot reset while async search is running"));
@@ -627,6 +743,7 @@ fn thousands_separate(x: usize) -> String {
 	chunks.join(",")
 }
 
+/// Handle for an in-progress asynchronous search. Stops search on drop.
 #[must_use]
 pub struct AsyncSearch<'a, Spec: 'a + MCTS> {
 	manager: &'a mut MCTSManager<Spec>,
@@ -648,6 +765,7 @@ impl<'a, Spec: MCTS> Drop for AsyncSearch<'a, Spec> {
 	}
 }
 
+/// Owned variant of `AsyncSearch`. Call `halt()` to stop and recover the manager.
 #[must_use]
 pub struct AsyncSearchOwned<Spec: MCTS> {
 	manager: Option<Box<MCTSManager<Spec>>>,
@@ -720,9 +838,14 @@ fn drain_join_unwrap(threads: &mut Vec<JoinHandle<()>>) {
 	}
 }
 
+/// Strategy for handling graph cycles caused by transposition tables.
 pub enum CycleBehaviour<Spec: MCTS> {
+	/// Ignore cycles (may cause infinite loops without depth limits).
 	Ignore,
+	/// Break the cycle and evaluate the current state.
 	UseCurrentEvalWhenCycleDetected,
+	/// Panic on cycle detection (useful for debugging).
 	PanicWhenCycleDetected,
+	/// Break the cycle and use this specific evaluation.
 	UseThisEvalWhenCycleDetected(StateEvaluation<Spec>),
 }

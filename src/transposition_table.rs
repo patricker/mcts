@@ -52,10 +52,20 @@ unsafe impl<Spec: MCTS<TranspositionTable=Self>> TranspositionTable<Spec> for ()
     }
 }
 
+/// Trait for game states that can be hashed for transposition table lookup.
+///
+/// The hash must be consistent: equal states must produce equal hashes.
+/// Hash `0` is reserved and will not be inserted into the table.
 pub trait TranspositionHash {
+    /// Compute a hash of this game state. Must return nonzero for insertable states.
     fn hash(&self) -> u64;
 }
 
+/// A lock-free hash table using quadratic probing with approximate semantics.
+///
+/// Hash collisions may cause states to share tree nodes (trading accuracy
+/// for memory efficiency). The table does not handle hash collisions precisely —
+/// this is by design for MCTS where approximate sharing is acceptable.
 pub struct ApproxQuadraticProbingHashTable<K: TranspositionHash, V> {
     arr: Box<[Entry16<K, V>]>,
     capacity: usize,
@@ -89,6 +99,7 @@ impl<K: TranspositionHash, V> Clone for Entry16<K, V> {
 }
 
 impl<K: TranspositionHash, V> ApproxQuadraticProbingHashTable<K, V> {
+    /// Create a table with the given capacity (must be a power of 2).
     pub fn new(capacity: usize) -> Self {
         assert!(std::mem::size_of::<Entry16<K, V>>() <= 16);
         assert!(capacity.count_ones() == 1, "the capacity must be a power of 2");
@@ -96,6 +107,7 @@ impl<K: TranspositionHash, V> ApproxQuadraticProbingHashTable<K, V> {
         let mask = capacity - 1;
         Self {arr, mask, capacity, size: AtomicUsize::default()}
     }
+    /// Create a table large enough to hold `num` entries with room to spare.
     pub fn enough_to_hold(num: usize) -> Self {
         let mut capacity = 1;
         while capacity * 2 < num * 3 {
@@ -108,6 +120,7 @@ impl<K: TranspositionHash, V> ApproxQuadraticProbingHashTable<K, V> {
 unsafe impl<K: TranspositionHash, V> Sync for ApproxQuadraticProbingHashTable<K, V> {}
 unsafe impl<K: TranspositionHash, V> Send for ApproxQuadraticProbingHashTable<K, V> {}
 
+/// Convenience alias for an approximate transposition table keyed by game state.
 pub type ApproxTable<Spec> =
          ApproxQuadraticProbingHashTable<<Spec as MCTS>::State, SearchNode<Spec>>;
 

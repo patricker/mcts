@@ -36,6 +36,8 @@ struct NodeStats {
 	sum_evaluations: AtomicI64,
 }
 
+/// Information about a single move from a search node: the move, its evaluation,
+/// visit statistics, and a pointer to the child node.
 pub struct MoveInfo<Spec: MCTS> {
 	mov: Move<Spec>,
 	move_evaluation: MoveEvaluation<Spec>,
@@ -44,12 +46,16 @@ pub struct MoveInfo<Spec: MCTS> {
 	stats: NodeStats,
 }
 
+/// A node in the search tree. Contains the list of moves, evaluation,
+/// visit statistics, and solver/bounds state.
 pub struct SearchNode<Spec: MCTS> {
 	moves: Vec<MoveInfo<Spec>>,
 	data: Spec::NodeData,
 	evaln: StateEvaluation<Spec>,
 	stats: NodeStats,
 	proven: AtomicU8,
+	score_lower: AtomicI32,
+	score_upper: AtomicI32,
 }
 
 impl<Spec: MCTS> SearchNode<Spec> {
@@ -60,11 +66,22 @@ impl<Spec: MCTS> SearchNode<Spec> {
 			evaln,
 			stats: NodeStats::new(),
 			proven: AtomicU8::new(ProvenValue::Unknown as u8),
+			score_lower: AtomicI32::new(i32::MIN),
+			score_upper: AtomicI32::new(i32::MAX),
 		}
 	}
 
+	/// The proven game-theoretic value of this node (for MCTS-Solver).
 	pub fn proven_value(&self) -> ProvenValue {
 		ProvenValue::from_u8(self.proven.load(Ordering::Relaxed))
+	}
+
+	/// The proven score bounds of this node (for Score-Bounded MCTS).
+	pub fn score_bounds(&self) -> ScoreBounds {
+		ScoreBounds {
+			lower: self.score_lower.load(Ordering::Relaxed),
+			upper: self.score_upper.load(Ordering::Relaxed),
+		}
 	}
 }
 
@@ -79,10 +96,12 @@ impl<Spec: MCTS> MoveInfo<Spec> {
 		}
 	}
 
+	/// The move this edge represents.
 	pub fn get_move(&self) -> &Move<Spec> {
 		&self.mov
 	}
 
+	/// The tree policy's evaluation of this move (e.g., prior probability).
 	pub fn move_evaluation(&self) -> &MoveEvaluation<Spec> {
 		&self.move_evaluation
 	}
@@ -91,14 +110,17 @@ impl<Spec: MCTS> MoveInfo<Spec> {
 		self.move_evaluation = eval;
 	}
 
+	/// Number of times this move has been selected during search.
 	pub fn visits(&self) -> u64 {
 		self.stats.visits.load(Ordering::Relaxed) as u64
 	}
 
+	/// Sum of backpropagated rewards through this move.
 	pub fn sum_rewards(&self) -> i64 {
 		self.stats.sum_evaluations.load(Ordering::Relaxed)
 	}
 
+	/// The child node reached by this move, if expanded.
 	pub fn child(&self) -> Option<NodeHandle<'_, Spec>> {
 		let ptr = self.child.load(Ordering::Relaxed);
 		if ptr.is_null() {
@@ -117,6 +139,18 @@ impl<Spec: MCTS> MoveInfo<Spec> {
 			ProvenValue::Unknown
 		} else {
 			unsafe { (*ptr).proven_value() }
+		}
+	}
+
+	/// Returns the score bounds of this move's child node.
+	/// Returns `ScoreBounds::UNBOUNDED` if the child has not been expanded.
+	/// Bounds are from the child's current player's perspective.
+	pub fn child_score_bounds(&self) -> ScoreBounds {
+		let ptr = self.child.load(Ordering::Relaxed);
+		if ptr.is_null() {
+			ScoreBounds::UNBOUNDED
+		} else {
+			unsafe { (*ptr).score_bounds() }
 		}
 	}
 }
@@ -193,6 +227,7 @@ fn create_node<Spec: MCTS>(
 	state: &Spec::State,
 	handle: Option<SearchHandle<Spec>>,
 	solver_enabled: bool,
+	score_bounded: bool,
 ) -> SearchNode<Spec> {
 	let moves = state.available_moves();
 	let (move_eval, state_eval) = eval.evaluate_new_state(state, &moves, handle);
@@ -204,9 +239,17 @@ fn create_node<Spec: MCTS>(
 		.collect();
 	moves.sort_by(|a, b| policy.compare_move_evaluations(&a.move_evaluation, &b.move_evaluation));
 	let node = SearchNode::new(moves, state_eval);
-	if solver_enabled && node.moves.is_empty() {
-		if let Some(tv) = state.terminal_value() {
-			node.proven.store(tv as u8, Ordering::Relaxed);
+	if node.moves.is_empty() {
+		if solver_enabled {
+			if let Some(tv) = state.terminal_value() {
+				node.proven.store(tv as u8, Ordering::Relaxed);
+			}
+		}
+		if score_bounded {
+			if let Some(score) = state.terminal_score() {
+				node.score_lower.store(score, Ordering::Relaxed);
+				node.score_upper.store(score, Ordering::Relaxed);
+			}
 		}
 	}
 	node
@@ -267,6 +310,45 @@ fn try_prove_node<Spec: MCTS>(node: &SearchNode<Spec>) -> ProvenValue {
 	ProvenValue::Unknown
 }
 
+/// Compute tightened score bounds for a node by examining all children (negamax).
+/// Parent's lower = max over children of negate(child.upper).
+/// Parent's upper = max over children of negate(child.lower).
+fn try_tighten_bounds<Spec: MCTS>(node: &SearchNode<Spec>) -> ScoreBounds {
+	if node.moves.is_empty() {
+		return node.score_bounds();
+	}
+
+	let mut best_lower = i32::MIN;
+	let mut best_upper = i32::MIN;
+
+	for move_info in &node.moves {
+		let child_ptr = move_info.child.load(Ordering::Relaxed);
+		let (child_lower, child_upper) = if child_ptr.is_null() {
+			(i32::MIN, i32::MAX)
+		} else {
+			unsafe {
+				let child = &*child_ptr;
+				(
+					child.score_lower.load(Ordering::Relaxed),
+					child.score_upper.load(Ordering::Relaxed),
+				)
+			}
+		};
+
+		// From parent's perspective (negamax): [-child_upper, -child_lower]
+		let parent_lower_from_child = negate_bound(child_upper);
+		let parent_upper_from_child = negate_bound(child_lower);
+
+		best_lower = best_lower.max(parent_lower_from_child);
+		best_upper = best_upper.max(parent_upper_from_child);
+	}
+
+	ScoreBounds {
+		lower: best_lower,
+		upper: best_upper,
+	}
+}
+
 fn is_cycle<T>(past: &[&T], current: &T) -> bool {
 	past.iter().any(|x| std::ptr::eq(*x, current))
 }
@@ -287,6 +369,7 @@ fn sample_chance_outcome<'a, M>(outcomes: &'a [(M, f64)], rng: &mut SmallRng) ->
 }
 
 impl<Spec: MCTS> SearchTree<Spec> {
+	/// Create a new search tree rooted at the given state.
 	pub fn new(
 		state: Spec::State,
 		manager: Spec,
@@ -295,7 +378,8 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		table: Spec::TranspositionTable,
 	) -> Self {
 		let solver = manager.solver_enabled();
-		let mut root_node = create_node(&eval, &tree_policy, &state, None, solver);
+		let score_bounded = manager.score_bounded_enabled();
+		let mut root_node = create_node(&eval, &tree_policy, &state, None, solver, score_bounded);
 		if let Some((epsilon, alpha)) = manager.dirichlet_noise() {
 			let mut rng = match manager.rng_seed() {
 				Some(seed) => SmallRng::seed_from_u64(seed.wrapping_add(u64::MAX)),
@@ -335,18 +419,22 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		tld
 	}
 
+	/// Reset the tree, re-creating the root node from the original state.
 	pub fn reset(self) -> Self {
 		Self::new(self.root_state, self.manager, self.tree_policy, self.eval, self.table)
 	}
 
+	/// The MCTS configuration.
 	pub fn spec(&self) -> &Spec {
 		&self.manager
 	}
 
+	/// Number of nodes currently in the tree.
 	pub fn num_nodes(&self) -> usize {
 		self.num_nodes.load(Ordering::SeqCst)
 	}
 
+	/// Run a single playout from root to leaf. Returns `false` if the node limit is reached or root is proven.
 	#[inline(never)]
 	pub fn playout(&self, tld: &mut ThreadDataFull<Spec>) -> bool {
 		let sentinel = IncreaseSentinel::new(&self.num_nodes);
@@ -354,9 +442,17 @@ impl<Spec: MCTS> SearchTree<Spec> {
 			return false;
 		}
 		let solver = self.manager.solver_enabled();
+		let score_bounded = self.manager.score_bounded_enabled();
 		// If root is already proven, stop searching
 		if solver && self.root_node.proven_value() != ProvenValue::Unknown {
 			return false;
+		}
+		// If root score bounds have converged, stop searching
+		if score_bounded {
+			let bounds = self.root_node.score_bounds();
+			if bounds.is_proven() {
+				return false;
+			}
 		}
 		let mut state = self.root_state.clone();
 		let path: &mut Vec<&MoveInfo<Spec>> = &mut tld.path.reuse_allocation();
@@ -475,6 +571,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
 			state,
 			Some(self.make_handle(current_node, tld)),
 			self.manager.solver_enabled(),
+			self.manager.score_bounded_enabled(),
 		);
 		let created = Box::into_raw(Box::new(created));
 		let other_child = choice.child.compare_exchange(null_mut(), created, Ordering::Relaxed, Ordering::Relaxed)
@@ -527,6 +624,10 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		if self.manager.solver_enabled() {
 			self.propagate_proven(path, node_path);
 		}
+		// Score-Bounded: propagate score bounds bottom-up
+		if self.manager.score_bounded_enabled() {
+			self.propagate_score_bounds(path, node_path);
+		}
 	}
 
 	/// Walk the playout path bottom-up, attempting to prove nodes.
@@ -574,6 +675,51 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		}
 	}
 
+	/// Walk the playout path bottom-up, tightening score bounds.
+	fn propagate_score_bounds(
+		&self,
+		path: &[&MoveInfo<Spec>],
+		node_path: &[&SearchNode<Spec>],
+	) {
+		for i in (0..path.len()).rev() {
+			let parent = if i == 0 {
+				&self.root_node
+			} else {
+				node_path[i - 1]
+			};
+
+			let new_bounds = try_tighten_bounds(parent);
+
+			let old_lower = parent.score_lower.load(Ordering::Relaxed);
+			let old_upper = parent.score_upper.load(Ordering::Relaxed);
+
+			// Monotonically tighten lower (only increases)
+			if new_bounds.lower > old_lower {
+				let _ = parent.score_lower.compare_exchange_weak(
+					old_lower,
+					new_bounds.lower,
+					Ordering::Relaxed,
+					Ordering::Relaxed,
+				);
+			}
+
+			// Monotonically tighten upper (only decreases)
+			if new_bounds.upper < old_upper {
+				let _ = parent.score_upper.compare_exchange_weak(
+					old_upper,
+					new_bounds.upper,
+					Ordering::Relaxed,
+					Ordering::Relaxed,
+				);
+			}
+
+			// If bounds didn't change, stop propagating
+			if new_bounds.lower <= old_lower && new_bounds.upper >= old_upper {
+				break;
+			}
+		}
+	}
+
 	fn make_handle<'a>(&'a self, node: &'a SearchNode<Spec>, tld: &'a mut ThreadData<Spec>) -> SearchHandle<'a, Spec> {
 		SearchHandle {
 			node,
@@ -582,17 +728,26 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		}
 	}
 
+	/// The game state at the root of the tree.
 	pub fn root_state(&self) -> &Spec::State {
 		&self.root_state
 	}
+	/// A handle to the root node.
 	pub fn root_node(&self) -> NodeHandle<'_, Spec> {
 		NodeHandle { node: &self.root_node }
 	}
 
+	/// The proven value of the root (for MCTS-Solver).
 	pub fn root_proven_value(&self) -> ProvenValue {
 		self.root_node.proven_value()
 	}
 
+	/// The score bounds of the root (for Score-Bounded MCTS).
+	pub fn root_score_bounds(&self) -> ScoreBounds {
+		self.root_node.score_bounds()
+	}
+
+	/// The best sequence of moves found by search, as move info handles.
 	pub fn principal_variation(&self, num_moves: usize) -> Vec<MoveInfoHandle<'_, Spec>> {
 		let mut result = Vec::new();
 		let mut crnt = &self.root_node;
@@ -611,6 +766,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		result
 	}
 
+	/// Diagnostic string with node counts, transposition hits, and contention events.
 	pub fn diagnose(&self) -> String {
 		let mut s = String::new();
 		s.push_str(&format!(
@@ -634,20 +790,24 @@ impl<Spec: MCTS> SearchTree<Spec> {
 	}
 }
 
+/// A borrowed reference to a `MoveInfo` in the search tree.
 pub type MoveInfoHandle<'a, Spec> = &'a MoveInfo<Spec>;
 
+/// Summary statistics for a root child, returned by `root_child_stats()`.
 pub struct ChildStats<Spec: MCTS> {
 	pub mov: Move<Spec>,
 	pub visits: u64,
 	pub avg_reward: f64,
 	pub move_evaluation: MoveEvaluation<Spec>,
 	pub proven_value: ProvenValue,
+	pub score_bounds: ScoreBounds,
 }
 
 impl<Spec: MCTS> SearchTree<Spec>
 where
 	MoveEvaluation<Spec>: Clone,
 {
+	/// Visit counts, average rewards, and proven values for all root children.
 	pub fn root_child_stats(&self) -> Vec<ChildStats<Spec>> {
 		self.root_node
 			.moves
@@ -665,6 +825,7 @@ where
 					avg_reward,
 					move_evaluation: mi.move_evaluation().clone(),
 					proven_value: mi.child_proven_value(),
+					score_bounds: mi.child_score_bounds(),
 				}
 			})
 			.collect()
@@ -675,6 +836,7 @@ impl<Spec: MCTS> SearchTree<Spec>
 where
 	Move<Spec>: Debug,
 {
+	/// Print root moves sorted by visit count (Debug format).
 	pub fn debug_moves(&self) {
 		let mut moves: Vec<&MoveInfo<Spec>> = self.root_node.moves.iter().collect();
 		moves.sort_by_key(|x| -(x.visits() as i64));
@@ -688,6 +850,7 @@ impl<Spec: MCTS> SearchTree<Spec>
 where
 	Move<Spec>: Display,
 {
+	/// Print root moves sorted by visit count (Display format).
 	pub fn display_moves(&self) {
 		let mut moves: Vec<&MoveInfo<Spec>> = self.root_node.moves.iter().collect();
 		moves.sort_by_key(|x| -(x.visits() as i64));
@@ -697,10 +860,14 @@ where
 	}
 }
 
+/// Error returned when `advance_root()` fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdvanceError {
+	/// The move does not exist among root children.
 	MoveNotFound,
+	/// The child node was never expanded during search.
 	ChildNotExpanded,
+	/// The child is a transposition table alias and cannot be detached.
 	ChildNotOwned,
 }
 
@@ -718,6 +885,7 @@ impl<Spec: MCTS> SearchTree<Spec>
 where
 	Move<Spec>: PartialEq,
 {
+	/// Advance the root to a child node, preserving the subtree below. Clears the transposition table.
 	pub fn advance_root(&mut self, mov: &Move<Spec>) -> Result<(), AdvanceError> {
 		// Find the MoveInfo matching the chosen move
 		let idx = self
@@ -783,23 +951,32 @@ where
 	}
 }
 
+/// An immutable handle to a search node. Provides access to node data, moves, and solver state.
 #[derive(Clone, Copy)]
 pub struct NodeHandle<'a, Spec: 'a + MCTS> {
 	node: &'a SearchNode<Spec>,
 }
 
 impl<'a, Spec: MCTS> NodeHandle<'a, Spec> {
+	/// User-defined node data.
 	pub fn data(&self) -> &'a Spec::NodeData {
 		&self.node.data
 	}
+	/// Iterator over this node's moves.
 	pub fn moves(&self) -> Moves<'_, Spec> {
 		Moves {
 			iter: self.node.moves.iter(),
 		}
 	}
+	/// The proven game-theoretic value of this node.
 	pub fn proven_value(&self) -> ProvenValue {
 		self.node.proven_value()
 	}
+	/// The proven score bounds of this node.
+	pub fn score_bounds(&self) -> ScoreBounds {
+		self.node.score_bounds()
+	}
+	/// Convert to a raw pointer for external storage.
 	pub fn into_raw(&self) -> *const () {
 		self.node as *const _ as *const ()
 	}
@@ -812,6 +989,7 @@ impl<'a, Spec: MCTS> NodeHandle<'a, Spec> {
 	}
 }
 
+/// Iterator over the moves of a search node.
 #[derive(Clone)]
 pub struct Moves<'a, Spec: 'a + MCTS> {
 	iter: std::slice::Iter<'a, MoveInfo<Spec>>,
@@ -824,6 +1002,8 @@ impl<'a, Spec: 'a + MCTS> Iterator for Moves<'a, Spec> {
 	}
 }
 
+/// A handle passed to evaluators and callbacks during search. Provides access to the
+/// current node and thread-local data.
 pub struct SearchHandle<'a, Spec: 'a + MCTS> {
 	node: &'a SearchNode<Spec>,
 	tld: &'a mut ThreadData<Spec>,
@@ -831,12 +1011,15 @@ pub struct SearchHandle<'a, Spec: 'a + MCTS> {
 }
 
 impl<'a, Spec: MCTS> SearchHandle<'a, Spec> {
+	/// The current search node.
 	pub fn node(&self) -> NodeHandle<'a, Spec> {
 		NodeHandle { node: self.node }
 	}
+	/// Mutable access to thread-local data.
 	pub fn thread_data(&mut self) -> &mut ThreadData<Spec> {
 		self.tld
 	}
+	/// The MCTS configuration.
 	pub fn mcts(&self) -> &'a Spec {
 		self.manager
 	}

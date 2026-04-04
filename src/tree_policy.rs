@@ -3,13 +3,22 @@ use rand::{rngs::SmallRng, Rng, SeedableRng};
 use super::*;
 use search_tree::*;
 
+/// Selects which child to explore during MCTS tree traversal.
+///
+/// Two built-in policies are provided:
+/// - [`UCTPolicy`] — classic UCB1 (Upper Confidence Bound). Move evaluations are `()`.
+/// - [`AlphaGoPolicy`] — PUCT with prior probabilities. Move evaluations are `f64` priors.
 pub trait TreePolicy<Spec: MCTS<TreePolicy = Self>>: Sync + Sized {
+	/// Per-move evaluation produced by the evaluator (e.g., `()` for UCT, `f64` prior for PUCT).
 	type MoveEvaluation: Sync + Send;
+	/// Thread-local data for the policy (e.g., an RNG for tie-breaking).
 	type ThreadLocalData: Default;
 
+	/// Select the most promising child to explore during a playout.
 	fn choose_child<'a, MoveIter>(&self, moves: MoveIter, handle: SearchHandle<Spec>) -> &'a MoveInfo<Spec>
 	where
 		MoveIter: Iterator<Item = &'a MoveInfo<Spec>> + Clone;
+	/// Validate move evaluations after node creation (e.g., check priors sum to 1).
 	fn validate_evaluations(&self, _evalns: &[Self::MoveEvaluation]) {}
 
 	/// Seed the thread-local data for deterministic search.
@@ -39,12 +48,20 @@ pub trait TreePolicy<Spec: MCTS<TreePolicy = Self>>: Sync + Sized {
 	}
 }
 
+/// Classic UCB1 (Upper Confidence Bound) tree policy.
+///
+/// Balances exploitation (high average reward) with exploration (low visit count)
+/// using the formula: `Q(a) + C * sqrt(2 * ln(N) / n(a))`.
+///
+/// Move evaluations are `()` — all moves start equal, differentiated only by search.
 #[derive(Clone, Debug)]
 pub struct UCTPolicy {
 	exploration_constant: f64,
 }
 
 impl UCTPolicy {
+	/// Create a UCT policy with the given exploration constant `C`.
+	/// Typical values: 0.5-2.0. Higher values explore more.
 	pub fn new(exploration_constant: f64) -> Self {
 		assert!(
 			exploration_constant > 0.0,
@@ -54,6 +71,7 @@ impl UCTPolicy {
 		Self { exploration_constant }
 	}
 
+	/// The exploration constant `C`.
 	pub fn exploration_constant(&self) -> f64 {
 		self.exploration_constant
 	}
@@ -61,6 +79,13 @@ impl UCTPolicy {
 
 const RECIPROCAL_TABLE_LEN: usize = 128;
 
+/// PUCT tree policy used by AlphaGo and AlphaZero.
+///
+/// Selects children using: `(Q(a) + C * P(a) * sqrt(N)) / (1 + n(a))`,
+/// where `P(a)` is the prior probability from the neural network.
+///
+/// Move evaluations are `f64` prior probabilities that must be non-negative
+/// and sum to approximately 1.
 #[derive(Clone, Debug)]
 pub struct AlphaGoPolicy {
 	exploration_constant: f64,
@@ -68,6 +93,8 @@ pub struct AlphaGoPolicy {
 }
 
 impl AlphaGoPolicy {
+	/// Create a PUCT policy with the given exploration constant `C`.
+	/// Typical values: 1.0-2.5. Higher values weight priors more heavily.
 	pub fn new(exploration_constant: f64) -> Self {
 		assert!(
 			exploration_constant > 0.0,
@@ -83,6 +110,7 @@ impl AlphaGoPolicy {
 		}
 	}
 
+	/// The exploration constant `C`.
 	pub fn exploration_constant(&self) -> f64 {
 		self.exploration_constant
 	}
@@ -273,24 +301,31 @@ fn sample_dirichlet(rng: &mut SmallRng, alpha: f64, n: usize) -> Vec<f64> {
 	samples
 }
 
+/// Thread-local RNG used by tree policies for tie-breaking.
+///
+/// When multiple children have equal scores, one is chosen uniformly at random.
+/// Can be seeded for deterministic search via [`MCTS::rng_seed()`].
 #[derive(Clone)]
 pub struct PolicyRng {
 	rng: SmallRng,
 }
 
 impl PolicyRng {
+	/// Create with a random seed from the system RNG.
 	pub fn new() -> Self {
 		Self {
 			rng: SmallRng::from_rng(rand::thread_rng()).unwrap(),
 		}
 	}
 
+	/// Create with a fixed seed for reproducible search.
 	pub fn seeded(seed: u64) -> Self {
 		Self {
 			rng: SmallRng::seed_from_u64(seed),
 		}
 	}
 
+	/// Select the element with the highest key, breaking ties uniformly at random.
 	pub fn select_by_key<T, Iter, KeyFn>(&mut self, elts: Iter, mut key_fn: KeyFn) -> Option<T>
 	where
 		Iter: Iterator<Item = T>,
