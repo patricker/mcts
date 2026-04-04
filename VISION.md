@@ -123,10 +123,15 @@ gap in most MCTS libraries.
 
 ```rust
 impl BatchEvaluator<MyMCTS> for NNEvaluator {
-    fn evaluate_batch(&self, leaves: &[GameState]) -> Vec<(Policy, Value)> {
+    type StateEvaluation = Value;
+    fn evaluate_batch(&self, leaves: &[(State, MoveList)]) -> Vec<(Vec<Policy>, Value)> {
         self.model.forward_batch(leaves)  // one GPU call for N leaves
     }
+    // ...
 }
+
+// Wrap it and use as a normal Evaluator — the bridge handles batching transparently
+let eval = BatchedEvaluatorBridge::new(NNEvaluator::new(), BatchConfig::default());
 ```
 
 - **Batched async evaluation.** Multiple search threads collect leaf states
@@ -442,6 +447,13 @@ parts are already done:
 | Cycle detection + configurable behavior | Ships |
 | Custom node data + evaluator traits | Ships |
 | Full test coverage + criterion benchmarks | Ships |
+| Seeded RNG (deterministic search) | Ships |
+| Dirichlet root noise | Ships |
+| First Play Urgency (FPU) | Ships |
+| Temperature-based move selection | Ships |
+| Batched neural network evaluation | Ships |
+| MCTS-Solver (proven value propagation) | Ships |
+| Chance nodes (open-loop stochastic transitions) | Ships |
 
 Every vision above builds on something that already works. The architecture
 (trait-based `GameState` + `Evaluator` + `TreePolicy` separation) is
