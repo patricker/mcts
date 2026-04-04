@@ -240,6 +240,14 @@ pub trait MCTS: Sized + Send + Sync + 'static {
 	fn score_bounded_enabled(&self) -> bool {
 		false
 	}
+	/// Enable closed-loop chance nodes: each chance outcome gets its own
+	/// child in the tree, selected by probability sampling. More accurate
+	/// per-outcome statistics than open-loop, but larger trees.
+	/// Requires discrete, enumerable outcomes via `GameState::chance_outcomes()`.
+	/// Default: false (open-loop: outcomes sampled but not stored in tree).
+	fn closed_loop_chance(&self) -> bool {
+		false
+	}
 	/// Called during backpropagation for each node on the playout path.
 	fn on_backpropagation(&self, _evaln: &StateEvaluation<Self>, _handle: SearchHandle<Self>) {}
 	/// How to handle cycles caused by transposition tables.

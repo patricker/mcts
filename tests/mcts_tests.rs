@@ -2323,6 +2323,462 @@ fn test_score_bounded_unbounded_without_feature() {
 }
 
 // ---------------------------------------------------------------------------
+// Terminal consistency tests (terminal_value + terminal_score interaction)
+// ---------------------------------------------------------------------------
+
+// UnifiedGame: a two-player game that implements BOTH terminal_value and
+// terminal_score, for testing cross-derivation and consistency.
+//
+// State 0 (P1): moves → [1, 2, 3]
+// State 1 (P2): terminal, score=10, value=Loss (P2 lost → consistent: score>0 from P2? No!)
+//   Actually: terminal_score is from current_player's perspective.
+//   P2 is current_player at state 1. If P2 lost, score should be negative.
+//   So: score=-10 (P2 lost, negative from P2's view), value=Loss
+// State 2 (P2): terminal, score=5, value=Win (P2 won, positive from P2's view)
+// State 3 (P2): terminal, score=0, value=Draw
+
+#[derive(Clone, Debug, PartialEq)]
+struct UnifiedGame {
+	state: u8,
+	current_player: NimPlayer,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct UnifiedMove(u8);
+
+impl std::fmt::Display for UnifiedMove {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		write!(f, "→{}", self.0)
+	}
+}
+
+impl GameState for UnifiedGame {
+	type Move = UnifiedMove;
+	type Player = NimPlayer;
+	type MoveList = Vec<UnifiedMove>;
+
+	fn current_player(&self) -> NimPlayer {
+		self.current_player
+	}
+
+	fn available_moves(&self) -> Vec<UnifiedMove> {
+		match self.state {
+			0 => vec![UnifiedMove(1), UnifiedMove(2), UnifiedMove(3)],
+			_ => vec![],
+		}
+	}
+
+	fn make_move(&mut self, mov: &UnifiedMove) {
+		self.state = mov.0;
+		self.current_player = match self.current_player {
+			NimPlayer::P1 => NimPlayer::P2,
+			NimPlayer::P2 => NimPlayer::P1,
+		};
+	}
+
+	fn terminal_value(&self) -> Option<ProvenValue> {
+		match self.state {
+			1 => Some(ProvenValue::Loss),
+			2 => Some(ProvenValue::Win),
+			3 => Some(ProvenValue::Draw),
+			_ => None,
+		}
+	}
+
+	fn terminal_score(&self) -> Option<i32> {
+		match self.state {
+			1 => Some(-10),
+			2 => Some(5),
+			3 => Some(0),
+			_ => None,
+		}
+	}
+}
+
+struct UnifiedEvaluator;
+
+impl<Spec: MCTS<State = UnifiedGame, TreePolicy = UCTPolicy>> Evaluator<Spec> for UnifiedEvaluator {
+	type StateEvaluation = i64;
+
+	fn evaluate_new_state(
+		&self,
+		_state: &UnifiedGame,
+		moves: &Vec<UnifiedMove>,
+		_: Option<SearchHandle<Spec>>,
+	) -> (Vec<()>, i64) {
+		(vec![(); moves.len()], 0)
+	}
+
+	fn interpret_evaluation_for_player(&self, evaln: &i64, _: &NimPlayer) -> i64 {
+		*evaln
+	}
+
+	fn evaluate_existing_state(
+		&self,
+		_: &UnifiedGame,
+		evaln: &i64,
+		_: SearchHandle<Spec>,
+	) -> i64 {
+		*evaln
+	}
+}
+
+// Both solver and score-bounded enabled
+#[derive(Default)]
+struct UnifiedBothMCTS;
+
+impl MCTS for UnifiedBothMCTS {
+	type State = UnifiedGame;
+	type Eval = UnifiedEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+
+	fn solver_enabled(&self) -> bool { true }
+	fn score_bounded_enabled(&self) -> bool { true }
+	fn rng_seed(&self) -> Option<u64> { Some(42) }
+}
+
+// ScoreOnlyGame: implements terminal_score but NOT terminal_value
+// Tests that solver auto-derives proven values from scores.
+#[derive(Clone, Debug, PartialEq)]
+struct ScoreOnlyGame {
+	state: u8,
+	current_player: NimPlayer,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ScoreOnlyMove(u8);
+
+impl std::fmt::Display for ScoreOnlyMove {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		write!(f, "→{}", self.0)
+	}
+}
+
+impl GameState for ScoreOnlyGame {
+	type Move = ScoreOnlyMove;
+	type Player = NimPlayer;
+	type MoveList = Vec<ScoreOnlyMove>;
+
+	fn current_player(&self) -> NimPlayer {
+		self.current_player
+	}
+
+	fn available_moves(&self) -> Vec<ScoreOnlyMove> {
+		match self.state {
+			0 => vec![ScoreOnlyMove(1), ScoreOnlyMove(2)],
+			_ => vec![],
+		}
+	}
+
+	fn make_move(&mut self, mov: &ScoreOnlyMove) {
+		self.state = mov.0;
+		self.current_player = match self.current_player {
+			NimPlayer::P1 => NimPlayer::P2,
+			NimPlayer::P2 => NimPlayer::P1,
+		};
+	}
+
+	// Only terminal_score, no terminal_value override
+	fn terminal_score(&self) -> Option<i32> {
+		match self.state {
+			1 => Some(-10), // current player (P2) lost
+			2 => Some(5),   // current player (P2) won
+			_ => None,
+		}
+	}
+}
+
+struct ScoreOnlyEvaluator;
+
+impl<Spec: MCTS<State = ScoreOnlyGame, TreePolicy = UCTPolicy>> Evaluator<Spec> for ScoreOnlyEvaluator {
+	type StateEvaluation = i64;
+
+	fn evaluate_new_state(
+		&self,
+		_state: &ScoreOnlyGame,
+		moves: &Vec<ScoreOnlyMove>,
+		_: Option<SearchHandle<Spec>>,
+	) -> (Vec<()>, i64) {
+		(vec![(); moves.len()], 0)
+	}
+
+	fn interpret_evaluation_for_player(&self, evaln: &i64, _: &NimPlayer) -> i64 {
+		*evaln
+	}
+
+	fn evaluate_existing_state(
+		&self,
+		_: &ScoreOnlyGame,
+		evaln: &i64,
+		_: SearchHandle<Spec>,
+	) -> i64 {
+		*evaln
+	}
+}
+
+#[derive(Default)]
+struct ScoreOnlySolverMCTS;
+
+impl MCTS for ScoreOnlySolverMCTS {
+	type State = ScoreOnlyGame;
+	type Eval = ScoreOnlyEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+
+	fn solver_enabled(&self) -> bool { true }
+	fn rng_seed(&self) -> Option<u64> { Some(42) }
+}
+
+// ValueOnlyGame: implements terminal_value but NOT terminal_score
+// Tests that score-bounded auto-derives bounds from proven values.
+#[derive(Clone, Debug, PartialEq)]
+struct ValueOnlyGame {
+	state: u8,
+	current_player: NimPlayer,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ValueOnlyMove(u8);
+
+impl std::fmt::Display for ValueOnlyMove {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		write!(f, "→{}", self.0)
+	}
+}
+
+impl GameState for ValueOnlyGame {
+	type Move = ValueOnlyMove;
+	type Player = NimPlayer;
+	type MoveList = Vec<ValueOnlyMove>;
+
+	fn current_player(&self) -> NimPlayer {
+		self.current_player
+	}
+
+	fn available_moves(&self) -> Vec<ValueOnlyMove> {
+		match self.state {
+			0 => vec![ValueOnlyMove(1), ValueOnlyMove(2)],
+			_ => vec![],
+		}
+	}
+
+	fn make_move(&mut self, mov: &ValueOnlyMove) {
+		self.state = mov.0;
+		self.current_player = match self.current_player {
+			NimPlayer::P1 => NimPlayer::P2,
+			NimPlayer::P2 => NimPlayer::P1,
+		};
+	}
+
+	// Only terminal_value, no terminal_score override
+	fn terminal_value(&self) -> Option<ProvenValue> {
+		match self.state {
+			1 => Some(ProvenValue::Loss),
+			2 => Some(ProvenValue::Win),
+			_ => None,
+		}
+	}
+}
+
+struct ValueOnlyEvaluator;
+
+impl Evaluator<ValueOnlyBoundsMCTS> for ValueOnlyEvaluator {
+	type StateEvaluation = i64;
+
+	fn evaluate_new_state(
+		&self,
+		_state: &ValueOnlyGame,
+		moves: &Vec<ValueOnlyMove>,
+		_: Option<SearchHandle<ValueOnlyBoundsMCTS>>,
+	) -> (Vec<()>, i64) {
+		(vec![(); moves.len()], 0)
+	}
+
+	fn interpret_evaluation_for_player(&self, evaln: &i64, _: &NimPlayer) -> i64 {
+		*evaln
+	}
+
+	fn evaluate_existing_state(
+		&self,
+		_: &ValueOnlyGame,
+		evaln: &i64,
+		_: SearchHandle<ValueOnlyBoundsMCTS>,
+	) -> i64 {
+		*evaln
+	}
+}
+
+#[derive(Default)]
+struct ValueOnlyBoundsMCTS;
+
+impl MCTS for ValueOnlyBoundsMCTS {
+	type State = ValueOnlyGame;
+	type Eval = ValueOnlyEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+
+	fn score_bounded_enabled(&self) -> bool { true }
+	fn rng_seed(&self) -> Option<u64> { Some(42) }
+}
+
+#[test]
+fn test_terminal_both_solver_and_bounds_consistent() {
+	// UnifiedGame provides both terminal_value and terminal_score.
+	// With both features enabled, both should be set correctly.
+	let mut mcts = MCTSManager::new(
+		UnifiedGame { state: 0, current_player: NimPlayer::P1 },
+		UnifiedBothMCTS, UnifiedEvaluator, UCTPolicy::new(1.0), (),
+	);
+	mcts.playout_n(50);
+	// Child 1: Loss from P2 → parent (P1) wins
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Win);
+	// Root bounds: P1 picks best of negate(-10)=10, negate(5)=-5, negate(0)=0 → 10
+	assert_eq!(mcts.root_score_bounds(), ScoreBounds::exact(10));
+}
+
+#[test]
+fn test_terminal_score_derives_proven_value() {
+	// ScoreOnlyGame has terminal_score but NOT terminal_value.
+	// Solver should auto-derive: score<0 → Loss, score>0 → Win.
+	let mut mcts = MCTSManager::new(
+		ScoreOnlyGame { state: 0, current_player: NimPlayer::P1 },
+		ScoreOnlySolverMCTS, ScoreOnlyEvaluator, UCTPolicy::new(1.0), (),
+	);
+	mcts.playout_n(50);
+	// Child 1 has score=-10 → derived Loss. Parent picks it → Win.
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Win);
+	let stats = mcts.root_child_stats();
+	let to_1 = stats.iter().find(|s| s.mov == ScoreOnlyMove(1)).unwrap();
+	assert_eq!(to_1.proven_value, ProvenValue::Loss);
+}
+
+#[test]
+fn test_terminal_value_derives_score_bounds() {
+	// ValueOnlyGame has terminal_value but NOT terminal_score.
+	// Score-bounded should auto-derive: Loss→-1, Win→1.
+	let mut mcts = MCTSManager::new(
+		ValueOnlyGame { state: 0, current_player: NimPlayer::P1 },
+		ValueOnlyBoundsMCTS, ValueOnlyEvaluator, UCTPolicy::new(1.0), (),
+	);
+	mcts.playout_n(50);
+	// Child 1: Loss → score=-1. Child 2: Win → score=1.
+	// Parent picks max(negate(-1), negate(1)) = max(1, -1) = 1
+	assert_eq!(mcts.root_score_bounds(), ScoreBounds::exact(1));
+}
+
+#[test]
+fn test_terminal_both_child_stats() {
+	let mut mcts = MCTSManager::new(
+		UnifiedGame { state: 0, current_player: NimPlayer::P1 },
+		UnifiedBothMCTS, UnifiedEvaluator, UCTPolicy::new(1.0), (),
+	);
+	mcts.playout_n(50);
+	let stats = mcts.root_child_stats();
+	let to_1 = stats.iter().find(|s| s.mov == UnifiedMove(1)).unwrap();
+	let to_2 = stats.iter().find(|s| s.mov == UnifiedMove(2)).unwrap();
+	let to_3 = stats.iter().find(|s| s.mov == UnifiedMove(3)).unwrap();
+	// Child proven values from child's perspective
+	assert_eq!(to_1.proven_value, ProvenValue::Loss);
+	assert_eq!(to_2.proven_value, ProvenValue::Win);
+	assert_eq!(to_3.proven_value, ProvenValue::Draw);
+	// Child score bounds from child's perspective
+	assert_eq!(to_1.score_bounds, ScoreBounds::exact(-10));
+	assert_eq!(to_2.score_bounds, ScoreBounds::exact(5));
+	assert_eq!(to_3.score_bounds, ScoreBounds::exact(0));
+}
+
+#[test]
+fn test_terminal_best_move_with_both() {
+	let mut mcts = MCTSManager::new(
+		UnifiedGame { state: 0, current_player: NimPlayer::P1 },
+		UnifiedBothMCTS, UnifiedEvaluator, UCTPolicy::new(1.0), (),
+	);
+	mcts.playout_n(50);
+	// Solver should prefer the winning move (→1, child Loss = parent Win)
+	assert_eq!(mcts.best_move().unwrap(), UnifiedMove(1));
+}
+
+// ---------------------------------------------------------------------------
+// Solver + Score-Bounded integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_integration_both_features_converge() {
+	// UnifiedGame provides both terminal_value and terminal_score.
+	// With both features enabled, both proven value and bounds should converge.
+	let mut mcts = MCTSManager::new(
+		UnifiedGame { state: 0, current_player: NimPlayer::P1 },
+		UnifiedBothMCTS, UnifiedEvaluator, UCTPolicy::new(1.0), (),
+	);
+	mcts.playout_n(100);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Win);
+	assert_eq!(mcts.root_score_bounds(), ScoreBounds::exact(10));
+}
+
+#[test]
+fn test_integration_bounds_convergence_sets_proven() {
+	// ScoreOnlyGame has terminal_score but no terminal_value.
+	// With both features enabled, terminal_value is auto-derived from score.
+	// Bounds converge, and convergence auto-sets proven value.
+	#[derive(Default)]
+	struct ScoreOnlyBothMCTS;
+	impl MCTS for ScoreOnlyBothMCTS {
+		type State = ScoreOnlyGame;
+		type Eval = ScoreOnlyEvaluator;
+		type NodeData = ();
+		type ExtraThreadData = ();
+		type TreePolicy = UCTPolicy;
+		type TranspositionTable = ();
+		fn solver_enabled(&self) -> bool { true }
+		fn score_bounded_enabled(&self) -> bool { true }
+		fn rng_seed(&self) -> Option<u64> { Some(42) }
+	}
+
+	let mut mcts = MCTSManager::new(
+		ScoreOnlyGame { state: 0, current_player: NimPlayer::P1 },
+		ScoreOnlyBothMCTS, ScoreOnlyEvaluator, UCTPolicy::new(1.0), (),
+	);
+	mcts.playout_n(50);
+	// Solver derives proven values from terminal_score. Root proven Win.
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Win);
+	// Bounds converge: max(negate(-10), negate(5)) = max(10, -5) = 10
+	assert_eq!(mcts.root_score_bounds(), ScoreBounds::exact(10));
+}
+
+#[test]
+fn test_integration_pruning_correct_result() {
+	// With bounds-based pruning active, the tree policy should still
+	// find the correct best move. Depth-2 tree exercises pruning logic
+	// during child selection.
+	let mut mcts = MCTSManager::new(
+		ScoreGame { state: 20, current_player: NimPlayer::P1 },
+		ScoreBoundedMCTS, ScoreEvaluator, UCTPolicy::new(1.0), (),
+	);
+	mcts.playout_n(200);
+	// Root value is 0 (P1 picks move→22). Pruning should not break this.
+	assert_eq!(mcts.root_score_bounds(), ScoreBounds::exact(0));
+	assert_eq!(mcts.best_move().unwrap(), ScoreMove(22));
+}
+
+#[test]
+fn test_integration_parallel_both_features() {
+	let mut mcts = MCTSManager::new(
+		UnifiedGame { state: 0, current_player: NimPlayer::P1 },
+		UnifiedBothMCTS, UnifiedEvaluator, UCTPolicy::new(1.0), (),
+	);
+	mcts.playout_n_parallel(500, 4);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Win);
+	assert_eq!(mcts.root_score_bounds(), ScoreBounds::exact(10));
+}
+
+// ---------------------------------------------------------------------------
 // Chance node tests
 // ---------------------------------------------------------------------------
 
@@ -2554,5 +3010,92 @@ fn test_chance_seeded_deterministic() {
 fn test_chance_parallel() {
 	let mut mcts = make_dice_mcts(0);
 	mcts.playout_n_parallel(50_000, 4);
+	assert_eq!(mcts.best_move().unwrap(), DiceMove::Roll);
+}
+
+// ---------------------------------------------------------------------------
+// Closed-loop chance node tests
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct ClosedLoopDiceMCTS;
+
+impl MCTS for ClosedLoopDiceMCTS {
+	type State = DiceGame;
+	type Eval = DiceEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+
+	fn closed_loop_chance(&self) -> bool {
+		true
+	}
+	fn rng_seed(&self) -> Option<u64> {
+		Some(42)
+	}
+}
+
+fn make_closed_loop_dice(score: i64) -> MCTSManager<ClosedLoopDiceMCTS> {
+	MCTSManager::new(
+		DiceGame::at(score),
+		ClosedLoopDiceMCTS,
+		DiceEvaluator,
+		UCTPolicy::new(0.5),
+		(),
+	)
+}
+
+#[test]
+fn test_closed_loop_roll_is_optimal() {
+	let mut mcts = make_closed_loop_dice(0);
+	mcts.playout_n(10_000);
+	assert_eq!(mcts.best_move().unwrap(), DiceMove::Roll);
+}
+
+#[test]
+fn test_closed_loop_larger_tree_than_open_loop() {
+	// Closed-loop should create more nodes (chance outcomes are stored in tree)
+	let mut open = MCTSManager::new(
+		DiceGame::at(0), SeededDiceMCTS, DiceEvaluator, UCTPolicy::new(0.5), (),
+	);
+	open.playout_n(1000);
+
+	let mut closed = make_closed_loop_dice(0);
+	closed.playout_n(1000);
+
+	assert!(
+		closed.tree().num_nodes() > open.tree().num_nodes(),
+		"Closed-loop should have more nodes: closed={}, open={}",
+		closed.tree().num_nodes(),
+		open.tree().num_nodes()
+	);
+}
+
+#[test]
+fn test_closed_loop_roll_optimal_from_seven() {
+	let mut mcts = make_closed_loop_dice(7);
+	mcts.playout_n(10_000);
+	assert_eq!(mcts.best_move().unwrap(), DiceMove::Roll);
+}
+
+#[test]
+fn test_closed_loop_parallel() {
+	let mut mcts = make_closed_loop_dice(0);
+	mcts.playout_n_parallel(10_000, 4);
+	assert_eq!(mcts.best_move().unwrap(), DiceMove::Roll);
+}
+
+#[test]
+fn test_closed_loop_default_disabled() {
+	let mcts = NoTranspositionMCTS;
+	assert!(!mcts.closed_loop_chance());
+}
+
+#[test]
+fn test_closed_loop_open_loop_still_works() {
+	// Existing open-loop behavior should be unchanged
+	let mut mcts = make_dice_mcts(0);
+	mcts.playout_n(10_000);
 	assert_eq!(mcts.best_move().unwrap(), DiceMove::Roll);
 }

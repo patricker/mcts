@@ -10,7 +10,7 @@ use search_tree::*;
 /// - [`AlphaGoPolicy`] — PUCT with prior probabilities. Move evaluations are `f64` priors.
 pub trait TreePolicy<Spec: MCTS<TreePolicy = Self>>: Sync + Sized {
 	/// Per-move evaluation produced by the evaluator (e.g., `()` for UCT, `f64` prior for PUCT).
-	type MoveEvaluation: Sync + Send;
+	type MoveEvaluation: Sync + Send + Default;
 	/// Thread-local data for the policy (e.g., an RNG for tie-breaking).
 	type ThreadLocalData: Default;
 
@@ -137,6 +137,13 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for UCTPolicy {
 		let ln_adjusted_total = adjusted_total.ln();
 		let fpu = handle.mcts().fpu_value();
 		let solver = handle.mcts().solver_enabled();
+		let score_bounded = handle.mcts().score_bounded_enabled();
+		// Pre-pass: compute best guaranteed score from parent's perspective for pruning
+		let best_lower = if score_bounded {
+			moves.clone().map(|m| negate_bound(m.child_score_bounds().upper)).max().unwrap_or(i32::MIN)
+		} else {
+			i32::MIN
+		};
 		handle
 			.thread_data()
 			.policy_data
@@ -150,6 +157,13 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for UCTPolicy {
 							return if cv == 0 { 0.0 } else { mov.sum_rewards() as f64 / cv as f64 };
 						}
 						ProvenValue::Unknown => {}
+					}
+				}
+				// Bounds-based pruning: skip children whose ceiling < best floor
+				if score_bounded && best_lower > i32::MIN {
+					let parent_upper = negate_bound(mov.child_score_bounds().lower);
+					if parent_upper < best_lower {
+						return f64::NEG_INFINITY;
 					}
 				}
 				let sum_rewards = mov.sum_rewards();
@@ -184,6 +198,12 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for AlphaGoPolicy {
 		let explore_coef = self.exploration_constant * sqrt_total_visits;
 		let fpu = handle.mcts().fpu_value();
 		let solver = handle.mcts().solver_enabled();
+		let score_bounded = handle.mcts().score_bounded_enabled();
+		let best_lower = if score_bounded {
+			moves.clone().map(|m| negate_bound(m.child_score_bounds().upper)).max().unwrap_or(i32::MIN)
+		} else {
+			i32::MIN
+		};
 		handle
 			.thread_data()
 			.policy_data
@@ -197,6 +217,12 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for AlphaGoPolicy {
 							return if cv == 0 { 0.0 } else { mov.sum_rewards() as f64 / cv as f64 };
 						}
 						ProvenValue::Unknown => {}
+					}
+				}
+				if score_bounded && best_lower > i32::MIN {
+					let parent_upper = negate_bound(mov.child_score_bounds().lower);
+					if parent_upper < best_lower {
+						return f64::NEG_INFINITY;
 					}
 				}
 				let child_visits = mov.visits();

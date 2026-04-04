@@ -56,6 +56,8 @@ pub struct SearchNode<Spec: MCTS> {
 	proven: AtomicU8,
 	score_lower: AtomicI32,
 	score_upper: AtomicI32,
+	is_chance: bool,
+	chance_probs: Vec<f64>,
 }
 
 impl<Spec: MCTS> SearchNode<Spec> {
@@ -68,6 +70,8 @@ impl<Spec: MCTS> SearchNode<Spec> {
 			proven: AtomicU8::new(ProvenValue::Unknown as u8),
 			score_lower: AtomicI32::new(i32::MIN),
 			score_upper: AtomicI32::new(i32::MAX),
+			is_chance: false,
+			chance_probs: Vec::new(),
 		}
 	}
 
@@ -228,7 +232,33 @@ fn create_node<Spec: MCTS>(
 	handle: Option<SearchHandle<Spec>>,
 	solver_enabled: bool,
 	score_bounded: bool,
+	closed_loop: bool,
 ) -> SearchNode<Spec> {
+	// Closed-loop chance: if the state has pending chance outcomes, create a chance node
+	if closed_loop {
+		if let Some(outcomes) = state.chance_outcomes() {
+			let probs: Vec<f64> = outcomes.iter().map(|(_, p)| *p).collect();
+			// Get state evaluation from evaluator (using available_moves, likely empty)
+			let avail = state.available_moves();
+			let (_, state_eval) = eval.evaluate_new_state(state, &avail, handle);
+			let moves: Vec<MoveInfo<Spec>> = outcomes
+				.into_iter()
+				.map(|(m, _)| MoveInfo::new(m, Default::default()))
+				.collect();
+			return SearchNode {
+				moves,
+				data: Default::default(),
+				evaln: state_eval,
+				stats: NodeStats::new(),
+				proven: AtomicU8::new(ProvenValue::Unknown as u8),
+				score_lower: AtomicI32::new(i32::MIN),
+				score_upper: AtomicI32::new(i32::MAX),
+				is_chance: true,
+				chance_probs: probs,
+			};
+		}
+	}
+
 	let moves = state.available_moves();
 	let (move_eval, state_eval) = eval.evaluate_new_state(state, &moves, handle);
 	policy.validate_evaluations(&move_eval);
@@ -240,15 +270,45 @@ fn create_node<Spec: MCTS>(
 	moves.sort_by(|a, b| policy.compare_move_evaluations(&a.move_evaluation, &b.move_evaluation));
 	let node = SearchNode::new(moves, state_eval);
 	if node.moves.is_empty() {
+		let tv = state.terminal_value();
+		let ts = state.terminal_score();
+
+		// Debug-mode consistency check when both are provided
+		#[cfg(debug_assertions)]
+		if let (Some(pv), Some(score)) = (tv, ts) {
+			match pv {
+				ProvenValue::Win => debug_assert!(score > 0,
+					"terminal_value is Win but terminal_score is {score}"),
+				ProvenValue::Loss => debug_assert!(score < 0,
+					"terminal_value is Loss but terminal_score is {score}"),
+				ProvenValue::Draw => debug_assert!(score == 0,
+					"terminal_value is Draw but terminal_score is {score}"),
+				ProvenValue::Unknown => {}
+			}
+		}
+
 		if solver_enabled {
-			if let Some(tv) = state.terminal_value() {
-				node.proven.store(tv as u8, Ordering::Relaxed);
+			let proven = tv.or_else(|| {
+				// Derive from terminal_score when terminal_value is not provided
+				ts.map(|s| if s > 0 { ProvenValue::Win } else if s < 0 { ProvenValue::Loss } else { ProvenValue::Draw })
+			});
+			if let Some(pv) = proven {
+				node.proven.store(pv as u8, Ordering::Relaxed);
 			}
 		}
 		if score_bounded {
-			if let Some(score) = state.terminal_score() {
-				node.score_lower.store(score, Ordering::Relaxed);
-				node.score_upper.store(score, Ordering::Relaxed);
+			let score = ts.or_else(|| {
+				// Derive from terminal_value when terminal_score is not provided
+				tv.and_then(|pv| match pv {
+					ProvenValue::Win => Some(1),
+					ProvenValue::Loss => Some(-1),
+					ProvenValue::Draw => Some(0),
+					ProvenValue::Unknown => None, // Don't derive bounds from Unknown
+				})
+			});
+			if let Some(s) = score {
+				node.score_lower.store(s, Ordering::Relaxed);
+				node.score_upper.store(s, Ordering::Relaxed);
 			}
 		}
 	}
@@ -349,6 +409,83 @@ fn try_tighten_bounds<Spec: MCTS>(node: &SearchNode<Spec>) -> ScoreBounds {
 	}
 }
 
+/// Prove a chance node: all children must be proven.
+/// WIN only if all outcomes WIN, LOSS only if all LOSS. No negation (same player).
+fn try_prove_chance_node<Spec: MCTS>(node: &SearchNode<Spec>) -> ProvenValue {
+	if node.moves.is_empty() {
+		return node.proven_value();
+	}
+	let mut all_win = true;
+	let mut all_loss = true;
+	for mi in &node.moves {
+		let ptr = mi.child.load(Ordering::Relaxed);
+		if ptr.is_null() {
+			return ProvenValue::Unknown;
+		}
+		let child_proven = unsafe { (*ptr).proven_value() };
+		match child_proven {
+			ProvenValue::Unknown => return ProvenValue::Unknown,
+			ProvenValue::Win => { all_loss = false; }
+			ProvenValue::Loss => { all_win = false; }
+			ProvenValue::Draw => { all_win = false; all_loss = false; }
+		}
+	}
+	if all_win {
+		ProvenValue::Win
+	} else if all_loss {
+		ProvenValue::Loss
+	} else {
+		ProvenValue::Draw
+	}
+}
+
+/// Tighten score bounds at a chance node using weighted averages.
+/// No negation (same player perspective through chance events).
+fn try_tighten_bounds_chance<Spec: MCTS>(node: &SearchNode<Spec>) -> ScoreBounds {
+	if node.moves.is_empty() {
+		return node.score_bounds();
+	}
+	let mut lower_sum: f64 = 0.0;
+	let mut upper_sum: f64 = 0.0;
+
+	for (mi, &prob) in node.moves.iter().zip(node.chance_probs.iter()) {
+		let ptr = mi.child.load(Ordering::Relaxed);
+		if ptr.is_null() {
+			return ScoreBounds::UNBOUNDED;
+		}
+		let child_lower = unsafe { (*ptr).score_lower.load(Ordering::Relaxed) };
+		let child_upper = unsafe { (*ptr).score_upper.load(Ordering::Relaxed) };
+		if child_lower == i32::MIN || child_upper == i32::MAX {
+			return ScoreBounds::UNBOUNDED;
+		}
+		lower_sum += prob * child_lower as f64;
+		upper_sum += prob * child_upper as f64;
+	}
+
+	ScoreBounds {
+		lower: lower_sum.floor() as i32,
+		upper: upper_sum.ceil() as i32,
+	}
+}
+
+/// Sample a child from a chance node by probability.
+fn sample_chance_child<'a, Spec: MCTS>(
+	node: &'a SearchNode<Spec>,
+	rng: &mut SmallRng,
+) -> &'a MoveInfo<Spec> {
+	debug_assert!(node.is_chance);
+	debug_assert!(!node.moves.is_empty(), "chance node has no outcomes");
+	let roll: f64 = rng.gen();
+	let mut cumulative = 0.0;
+	for (mi, &prob) in node.moves.iter().zip(node.chance_probs.iter()) {
+		cumulative += prob;
+		if roll < cumulative {
+			return mi;
+		}
+	}
+	node.moves.last().unwrap()
+}
+
 fn is_cycle<T>(past: &[&T], current: &T) -> bool {
 	past.iter().any(|x| std::ptr::eq(*x, current))
 }
@@ -379,7 +516,8 @@ impl<Spec: MCTS> SearchTree<Spec> {
 	) -> Self {
 		let solver = manager.solver_enabled();
 		let score_bounded = manager.score_bounded_enabled();
-		let mut root_node = create_node(&eval, &tree_policy, &state, None, solver, score_bounded);
+		let closed_loop = manager.closed_loop_chance();
+		let mut root_node = create_node(&eval, &tree_policy, &state, None, solver, score_bounded, closed_loop);
 		if let Some((epsilon, alpha)) = manager.dirichlet_noise() {
 			let mut rng = match manager.rng_seed() {
 				Some(seed) => SmallRng::seed_from_u64(seed.wrapping_add(u64::MAX)),
@@ -459,12 +597,16 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		let node_path: &mut Vec<&SearchNode<Spec>> = &mut tld.node_path.reuse_allocation();
 		let players: &mut Vec<Player<Spec>> = &mut tld.players.reuse_allocation();
 		let chance_rng = &mut tld.chance_rng;
+		let closed_loop = self.manager.closed_loop_chance();
 		let tld = &mut tld.tld;
 
-		// Resolve any pending chance events at the root state
-		while let Some(outcomes) = state.chance_outcomes() {
-			let outcome = sample_chance_outcome(&outcomes, chance_rng);
-			state.make_move(outcome);
+		// Resolve any pending chance events at the root state (open-loop only;
+		// closed-loop handles them as tree nodes)
+		if !closed_loop {
+			while let Some(outcomes) = state.chance_outcomes() {
+				let outcome = sample_chance_outcome(&outcomes, chance_rng);
+				state.make_move(outcome);
+			}
 		}
 
 		let mut did_we_create = false;
@@ -482,11 +624,15 @@ impl<Spec: MCTS> SearchTree<Spec> {
 			if path.len() >= self.manager.max_playout_length() {
 				break;
 			}
-			let parent_visits = node.stats.visits.load(Ordering::Relaxed) as u64;
-			let max_children = state.max_children(parent_visits).max(1).min(node.moves.len());
-			let choice = self
-				.tree_policy
-				.choose_child(node.moves[..max_children].iter(), self.make_handle(node, tld));
+			// Select child: probability sampling for chance nodes, tree policy for decision nodes
+			let choice = if node.is_chance {
+				sample_chance_child(node, chance_rng)
+			} else {
+				let parent_visits = node.stats.visits.load(Ordering::Relaxed) as u64;
+				let max_children = state.max_children(parent_visits).max(1).min(node.moves.len());
+				self.tree_policy
+					.choose_child(node.moves[..max_children].iter(), self.make_handle(node, tld))
+			};
 			choice.stats.down(&self.manager);
 			players.push(state.current_player());
 			path.push(choice);
@@ -496,10 +642,12 @@ impl<Spec: MCTS> SearchTree<Spec> {
 				self.manager.max_playout_length()
 			);
 			state.make_move(&choice.mov);
-			// Resolve any chance events after the move
-			while let Some(outcomes) = state.chance_outcomes() {
-				let outcome = sample_chance_outcome(&outcomes, chance_rng);
-				state.make_move(outcome);
+			// Resolve any chance events after the move (open-loop only)
+			if !closed_loop {
+				while let Some(outcomes) = state.chance_outcomes() {
+					let outcome = sample_chance_outcome(&outcomes, chance_rng);
+					state.make_move(outcome);
+				}
 			}
 			let (new_node, new_did_we_create) = self.descend(&state, choice, node, tld);
 			node = new_node;
@@ -572,6 +720,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
 			Some(self.make_handle(current_node, tld)),
 			self.manager.solver_enabled(),
 			self.manager.score_bounded_enabled(),
+			self.manager.closed_loop_chance(),
 		);
 		let created = Box::into_raw(Box::new(created));
 		let other_child = choice.child.compare_exchange(null_mut(), created, Ordering::Relaxed, Ordering::Relaxed)
@@ -660,7 +809,11 @@ impl<Spec: MCTS> SearchTree<Spec> {
 				continue;
 			}
 
-			let parent_proven = try_prove_node(parent);
+			let parent_proven = if parent.is_chance {
+				try_prove_chance_node(parent)
+			} else {
+				try_prove_node(parent)
+			};
 			if parent_proven == ProvenValue::Unknown {
 				break;
 			}
@@ -669,7 +822,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
 			let _ = parent.proven.compare_exchange(
 				ProvenValue::Unknown as u8,
 				parent_proven as u8,
-				Ordering::Release,
+				Ordering::Relaxed,
 				Ordering::Relaxed,
 			);
 		}
@@ -688,7 +841,11 @@ impl<Spec: MCTS> SearchTree<Spec> {
 				node_path[i - 1]
 			};
 
-			let new_bounds = try_tighten_bounds(parent);
+			let new_bounds = if parent.is_chance {
+				try_tighten_bounds_chance(parent)
+			} else {
+				try_tighten_bounds(parent)
+			};
 
 			let old_lower = parent.score_lower.load(Ordering::Relaxed);
 			let old_upper = parent.score_upper.load(Ordering::Relaxed);
@@ -708,6 +865,23 @@ impl<Spec: MCTS> SearchTree<Spec> {
 				let _ = parent.score_upper.compare_exchange_weak(
 					old_upper,
 					new_bounds.upper,
+					Ordering::Relaxed,
+					Ordering::Relaxed,
+				);
+			}
+
+			// Cross-system: converged bounds set proven value when solver is active
+			if self.manager.solver_enabled() && new_bounds.lower == new_bounds.upper {
+				let pv = if new_bounds.lower > 0 {
+					ProvenValue::Win
+				} else if new_bounds.lower < 0 {
+					ProvenValue::Loss
+				} else {
+					ProvenValue::Draw
+				};
+				let _ = parent.proven.compare_exchange(
+					ProvenValue::Unknown as u8,
+					pv as u8,
 					Ordering::Relaxed,
 					Ordering::Relaxed,
 				);
@@ -752,7 +926,13 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		let mut result = Vec::new();
 		let mut crnt = &self.root_node;
 		while !crnt.moves.is_empty() && result.len() < num_moves {
-			let choice = self.manager.select_child_after_search(&crnt.moves);
+			// Chance nodes: select by most-visited (reflects highest probability).
+			// Decision nodes: use solver/bounds-aware selection.
+			let choice = if crnt.is_chance {
+				crnt.moves.iter().max_by_key(|c| c.visits()).unwrap()
+			} else {
+				self.manager.select_child_after_search(&crnt.moves)
+			};
 			result.push(choice);
 			let child = choice.child.load(Ordering::SeqCst) as *const SearchNode<Spec>;
 			if child.is_null() {
