@@ -6,7 +6,7 @@ use {
 	std::{
 		fmt,
 		fmt::{Debug, Display, Formatter},
-		ptr::{null, null_mut},
+		ptr::null_mut,
 		sync::Mutex,
 	},
 };
@@ -96,12 +96,12 @@ impl<Spec: MCTS> MoveInfo<Spec> {
 	}
 
 	pub fn sum_rewards(&self) -> i64 {
-		self.stats.sum_evaluations.load(Ordering::Relaxed) as i64
+		self.stats.sum_evaluations.load(Ordering::Relaxed)
 	}
 
 	pub fn child(&self) -> Option<NodeHandle<'_, Spec>> {
 		let ptr = self.child.load(Ordering::Relaxed);
-		if ptr == null_mut() {
+		if ptr.is_null() {
 			None
 		} else {
 			unsafe { Some(NodeHandle { node: &*ptr }) }
@@ -179,7 +179,7 @@ impl<Spec: MCTS> Drop for MoveInfo<Spec> {
 			return;
 		}
 		let ptr = self.child.load(Ordering::SeqCst);
-		if ptr != null_mut() {
+		if !ptr.is_null() {
 			unsafe {
 				drop(Box::from_raw(ptr));
 			}
@@ -195,11 +195,11 @@ fn create_node<Spec: MCTS>(
 	solver_enabled: bool,
 ) -> SearchNode<Spec> {
 	let moves = state.available_moves();
-	let (move_eval, state_eval) = eval.evaluate_new_state(&state, &moves, handle);
+	let (move_eval, state_eval) = eval.evaluate_new_state(state, &moves, handle);
 	policy.validate_evaluations(&move_eval);
 	let mut moves: Vec<MoveInfo<Spec>> = moves
 		.into_iter()
-		.zip(move_eval.into_iter())
+		.zip(move_eval)
 		.map(|(m, e)| MoveInfo::new(m, e))
 		.collect();
 	moves.sort_by(|a, b| policy.compare_move_evaluations(&a.move_evaluation, &b.move_evaluation));
@@ -268,7 +268,7 @@ fn try_prove_node<Spec: MCTS>(node: &SearchNode<Spec>) -> ProvenValue {
 }
 
 fn is_cycle<T>(past: &[&T], current: &T) -> bool {
-	past.iter().any(|x| *x as *const T == current as *const T)
+	past.iter().any(|x| std::ptr::eq(*x, current))
 }
 
 /// Sample from a weighted distribution of chance outcomes.
@@ -359,9 +359,9 @@ impl<Spec: MCTS> SearchTree<Spec> {
 			return false;
 		}
 		let mut state = self.root_state.clone();
-		let path: &mut Vec<&MoveInfo<Spec>> = &mut *tld.path.reuse_allocation();
-		let node_path: &mut Vec<&SearchNode<Spec>> = &mut *tld.node_path.reuse_allocation();
-		let players: &mut Vec<Player<Spec>> = &mut *tld.players.reuse_allocation();
+		let path: &mut Vec<&MoveInfo<Spec>> = &mut tld.path.reuse_allocation();
+		let node_path: &mut Vec<&SearchNode<Spec>> = &mut tld.node_path.reuse_allocation();
+		let players: &mut Vec<Player<Spec>> = &mut tld.players.reuse_allocation();
 		let chance_rng = &mut tld.chance_rng;
 		let tld = &mut tld.tld;
 
@@ -374,7 +374,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		let mut did_we_create = false;
 		let mut node = &self.root_node;
 		loop {
-			if node.moves.len() == 0 {
+			if node.moves.is_empty() {
 				break;
 			}
 			if solver && node.proven_value() != ProvenValue::Unknown {
@@ -411,18 +411,18 @@ impl<Spec: MCTS> SearchTree<Spec> {
 			match self.manager.cycle_behaviour() {
 				CycleBehaviour::Ignore => (),
 				CycleBehaviour::PanicWhenCycleDetected => {
-					if is_cycle(&node_path, node) {
+					if is_cycle(node_path, node) {
 						panic!("cycle detected! you should do one of the following:\n- make states acyclic\n- remove transposition table\n- change cycle_behaviour()");
 					}
 				}
 				CycleBehaviour::UseCurrentEvalWhenCycleDetected => {
-					if is_cycle(&node_path, node) {
+					if is_cycle(node_path, node) {
 						break;
 					}
 				}
 				CycleBehaviour::UseThisEvalWhenCycleDetected(e) => {
-					if is_cycle(&node_path, node) {
-						self.finish_playout(&path, &node_path, &players, tld, &e);
+					if is_cycle(node_path, node) {
+						self.finish_playout(path, node_path, players, tld, &e);
 						return true;
 					}
 				}
@@ -442,7 +442,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
 			)
 		};
 		let evaln = new_evaln.as_ref().unwrap_or(&node.evaln);
-		self.finish_playout(&path, &node_path, &players, tld, evaln);
+		self.finish_playout(path, node_path, players, tld, evaln);
 		true
 	}
 
@@ -453,16 +453,16 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		current_node: &'b SearchNode<Spec>,
 		tld: &'b mut ThreadData<Spec>,
 	) -> (&'a SearchNode<Spec>, bool) {
-		let child = choice.child.load(Ordering::Relaxed) as *const _;
-		if child != null() {
+		let child = choice.child.load(Ordering::Relaxed);
+		if !child.is_null() {
 			return unsafe { (&*child, false) };
 		}
 		if let Some(node) = self.table.lookup(state, self.make_handle(current_node, tld)) {
 			let child = choice
 				.child
 				.compare_exchange(null_mut(), node as *const _ as *mut _, Ordering::Relaxed, Ordering::Relaxed)
-				.unwrap_or_else(|x| x) as *const _;
-			if child == null() {
+				.unwrap_or_else(|x| x);
+			if child.is_null() {
 				self.transposition_table_hits.fetch_add(1, Ordering::Relaxed);
 				return (node, false);
 			} else {
@@ -479,7 +479,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		let created = Box::into_raw(Box::new(created));
 		let other_child = choice.child.compare_exchange(null_mut(), created, Ordering::Relaxed, Ordering::Relaxed)
 			.unwrap_or_else(|x| x);
-		if other_child != null_mut() {
+		if !other_child.is_null() {
 			self.expansion_contention_events.fetch_add(1, Ordering::Relaxed);
 			unsafe {
 				drop(Box::from_raw(created));
@@ -517,11 +517,11 @@ impl<Spec: MCTS> SearchTree<Spec> {
 			// populated by descend() during the playout traversal that built this path.
 			unsafe {
 				self.manager
-					.on_backpropagation(&evaln, self.make_handle(&*move_info.child.load(Ordering::Relaxed), tld));
+					.on_backpropagation(evaln, self.make_handle(&*move_info.child.load(Ordering::Relaxed), tld));
 			}
 		}
 		self.manager
-			.on_backpropagation(&evaln, self.make_handle(&self.root_node, tld));
+			.on_backpropagation(evaln, self.make_handle(&self.root_node, tld));
 
 		// Solver: propagate proven values bottom-up
 		if self.manager.solver_enabled() {
@@ -596,11 +596,11 @@ impl<Spec: MCTS> SearchTree<Spec> {
 	pub fn principal_variation(&self, num_moves: usize) -> Vec<MoveInfoHandle<'_, Spec>> {
 		let mut result = Vec::new();
 		let mut crnt = &self.root_node;
-		while crnt.moves.len() != 0 && result.len() < num_moves {
+		while !crnt.moves.is_empty() && result.len() < num_moves {
 			let choice = self.manager.select_child_after_search(&crnt.moves);
 			result.push(choice);
 			let child = choice.child.load(Ordering::SeqCst) as *const SearchNode<Spec>;
-			if child == null() {
+			if child.is_null() {
 				break;
 			} else {
 				unsafe {
@@ -730,7 +730,7 @@ where
 		// Validate the child exists and is owned
 		let move_info = &self.root_node.moves[idx];
 		let child_ptr = move_info.child.load(Ordering::SeqCst);
-		if child_ptr == null_mut() {
+		if child_ptr.is_null() {
 			return Err(AdvanceError::ChildNotExpanded);
 		}
 		if !move_info.owned.load(Ordering::SeqCst) {
@@ -803,6 +803,8 @@ impl<'a, Spec: MCTS> NodeHandle<'a, Spec> {
 	pub fn into_raw(&self) -> *const () {
 		self.node as *const _ as *const ()
 	}
+	/// # Safety
+	/// `ptr` must have been obtained from `into_raw()` on a still-live `NodeHandle`.
 	pub unsafe fn from_raw(ptr: *const ()) -> Self {
 		NodeHandle {
 			node: &*(ptr as *const SearchNode<Spec>),

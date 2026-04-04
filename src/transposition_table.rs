@@ -2,6 +2,9 @@ use super::*;
 use search_tree::*;
 use atomics::*;
 
+/// # Safety
+/// Implementations must follow the contract on `insert`: if a value is inserted,
+/// `None` must be returned. Violating this leads to memory unsafety (double-free).
 pub unsafe trait TranspositionTable<Spec: MCTS>: Sync + Sized {
     /// **If this function inserts a value, it must return `None`.** Failure to follow
     /// this rule will lead to memory safety violation.
@@ -118,7 +121,7 @@ fn get_or_write<'a, V>(ptr: &AtomicPtr<V>, v: &'a V) -> Option<&'a V> {
 }
 
 fn convert<'a, V>(ptr: *const V) -> Option<&'a V> {
-    if ptr == std::ptr::null() {
+    if ptr.is_null() {
         None
     } else {
         unsafe { Some(&*ptr) }
@@ -142,10 +145,10 @@ unsafe impl<Spec> TranspositionTable<Spec> for ApproxTable<Spec>
         let mut posn = my_hash as usize & self.mask;
         for inc in 1..(PROBE_LIMIT + 1) {
             let entry = unsafe { self.arr.get_unchecked(posn) };
-            let key_here = entry.k.load(Ordering::Relaxed) as u64;
+            let key_here = entry.k.load(Ordering::Relaxed);
             if key_here == my_hash {
                 let value_here = entry.v.load(Ordering::Relaxed);
-                if value_here != std::ptr::null_mut() {
+                if !value_here.is_null() {
                     return unsafe { Some(&*value_here) };
                 }
                 return get_or_write(&entry.v, value);
@@ -176,7 +179,7 @@ unsafe impl<Spec> TranspositionTable<Spec> for ApproxTable<Spec>
         let mut posn = my_hash as usize & self.mask;
         for inc in 1..(PROBE_LIMIT + 1) {
             let entry = unsafe { self.arr.get_unchecked(posn) };
-            let key_here = entry.k.load(Ordering::Relaxed) as u64;
+            let key_here = entry.k.load(Ordering::Relaxed);
             if key_here == my_hash {
                 return convert(entry.v.load(Ordering::Relaxed));
             }

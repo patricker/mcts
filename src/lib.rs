@@ -16,104 +16,104 @@
 //!
 //! #[derive(Clone, Debug, PartialEq)]
 //! enum Move {
-//! 	Add,
-//! 	Sub,
+//!     Add,
+//!     Sub,
 //! }
 //!
 //! impl GameState for CountingGame {
-//! 	type Move = Move;
-//! 	type Player = ();
-//! 	type MoveList = Vec<Move>;
+//!     type Move = Move;
+//!     type Player = ();
+//!     type MoveList = Vec<Move>;
 //!
-//! 	fn current_player(&self) -> Self::Player {
-//! 		()
-//! 	}
-//! 	fn available_moves(&self) -> Vec<Move> {
-//! 		let x = self.0;
-//! 		if x == 100 {
-//! 			vec![]
-//! 		} else {
-//! 			vec![Move::Add, Move::Sub]
-//! 		}
-//! 	}
-//! 	fn make_move(&mut self, mov: &Self::Move) {
-//! 		match *mov {
-//! 			Move::Add => self.0 += 1,
-//! 			Move::Sub => self.0 -= 1,
-//! 		}
-//! 	}
+//!     fn current_player(&self) -> Self::Player {
+//!         ()
+//!     }
+//!     fn available_moves(&self) -> Vec<Move> {
+//!         let x = self.0;
+//!         if x == 100 {
+//!             vec![]
+//!         } else {
+//!             vec![Move::Add, Move::Sub]
+//!         }
+//!     }
+//!     fn make_move(&mut self, mov: &Self::Move) {
+//!         match *mov {
+//!             Move::Add => self.0 += 1,
+//!             Move::Sub => self.0 -= 1,
+//!         }
+//!     }
 //! }
 //!
 //! impl TranspositionHash for CountingGame {
-//! 	fn hash(&self) -> u64 {
-//! 		self.0 as u64
-//! 	}
+//!     fn hash(&self) -> u64 {
+//!         self.0 as u64
+//!     }
 //! }
 //!
 //! struct MyEvaluator;
 //!
 //! impl Evaluator<MyMCTS> for MyEvaluator {
-//! 	type StateEvaluation = i64;
+//!     type StateEvaluation = i64;
 //!
-//! 	fn evaluate_new_state(
-//! 		&self,
-//! 		state: &CountingGame,
-//! 		moves: &Vec<Move>,
-//! 		_: Option<SearchHandle<MyMCTS>>,
-//! 	) -> (Vec<()>, i64) {
-//! 		(vec![(); moves.len()], state.0)
-//! 	}
-//! 	fn interpret_evaluation_for_player(&self, evaln: &i64, _player: &()) -> i64 {
-//! 		*evaln
-//! 	}
-//! 	fn evaluate_existing_state(
-//! 		&self,
-//! 		_: &CountingGame,
-//! 		evaln: &i64,
-//! 		_: SearchHandle<MyMCTS>,
-//! 	) -> i64 {
-//! 		*evaln
-//! 	}
+//!     fn evaluate_new_state(
+//!         &self,
+//!         state: &CountingGame,
+//!         moves: &Vec<Move>,
+//!         _: Option<SearchHandle<MyMCTS>>,
+//!     ) -> (Vec<()>, i64) {
+//!         (vec![(); moves.len()], state.0)
+//!     }
+//!     fn interpret_evaluation_for_player(&self, evaln: &i64, _player: &()) -> i64 {
+//!         *evaln
+//!     }
+//!     fn evaluate_existing_state(
+//!         &self,
+//!         _: &CountingGame,
+//!         evaln: &i64,
+//!         _: SearchHandle<MyMCTS>,
+//!     ) -> i64 {
+//!         *evaln
+//!     }
 //! }
 //!
 //! #[derive(Default)]
 //! struct MyMCTS;
 //!
 //! impl MCTS for MyMCTS {
-//! 	type State = CountingGame;
-//! 	type Eval = MyEvaluator;
-//! 	type NodeData = ();
-//! 	type ExtraThreadData = ();
-//! 	type TreePolicy = UCTPolicy;
-//! 	type TranspositionTable = ApproxTable<Self>;
+//!     type State = CountingGame;
+//!     type Eval = MyEvaluator;
+//!     type NodeData = ();
+//!     type ExtraThreadData = ();
+//!     type TreePolicy = UCTPolicy;
+//!     type TranspositionTable = ApproxTable<Self>;
 //!
-//! 	fn cycle_behaviour(&self) -> CycleBehaviour<Self> {
-//! 		CycleBehaviour::UseCurrentEvalWhenCycleDetected
-//! 	}
+//!     fn cycle_behaviour(&self) -> CycleBehaviour<Self> {
+//!         CycleBehaviour::UseCurrentEvalWhenCycleDetected
+//!     }
 //! }
 //!
 //! let game = CountingGame(0);
 //! let mut mcts = MCTSManager::new(
-//! 	game,
-//! 	MyMCTS,
-//! 	MyEvaluator,
-//! 	UCTPolicy::new(0.5),
-//! 	ApproxTable::new(1024),
+//!     game,
+//!     MyMCTS,
+//!     MyEvaluator,
+//!     UCTPolicy::new(0.5),
+//!     ApproxTable::new(1024),
 //! );
 //! mcts.playout_n_parallel(10000, 4); // 10000 playouts, 4 search threads
 //! mcts.tree().debug_moves();
 //! assert_eq!(mcts.best_move().unwrap(), Move::Add);
 //! assert_eq!(mcts.principal_variation(50), vec![Move::Add; 50]);
 //! assert_eq!(
-//! 	mcts.principal_variation_states(5),
-//! 	vec![
-//! 		CountingGame(0),
-//! 		CountingGame(1),
-//! 		CountingGame(2),
-//! 		CountingGame(3),
-//! 		CountingGame(4),
-//! 		CountingGame(5)
-//! 	]
+//!     mcts.principal_variation_states(5),
+//!     vec![
+//!         CountingGame(0),
+//!         CountingGame(1),
+//!         CountingGame(2),
+//!         CountingGame(3),
+//!         CountingGame(4),
+//!         CountingGame(5)
+//!     ]
 //! );
 //! ```
 
@@ -158,7 +158,7 @@ pub trait MCTS: Sized + Send + Sync + 'static {
 		1
 	}
 	fn node_limit(&self) -> usize {
-		std::usize::MAX
+		usize::MAX
 	}
 	fn select_child_after_search<'a>(&self, children: &'a [MoveInfo<Self>]) -> &'a MoveInfo<Self> {
 		if self.solver_enabled() {
@@ -171,7 +171,7 @@ pub trait MCTS: Sized + Send + Sync + 'static {
 				return drawer;
 			}
 		}
-		children.into_iter().max_by_key(|child| child.visits()).unwrap()
+		children.iter().max_by_key(|child| child.visits()).unwrap()
 	}
 	/// `playout` panics when this length is exceeded. Defaults to one million.
 	fn max_playout_length(&self) -> usize {
@@ -505,8 +505,7 @@ where
 		self.search_tree
 			.principal_variation(num_moves)
 			.into_iter()
-			.map(|x| x.get_move())
-			.map(|x| x.clone())
+			.map(|x| x.get_move().clone())
 			.collect()
 	}
 	pub fn principal_variation_states(&self, num_moves: usize) -> Vec<Spec::State> {
@@ -529,7 +528,7 @@ where
 	pub fn best_move(&self) -> Option<Move<Spec>> {
 		let temperature = self.search_tree.spec().selection_temperature();
 		if temperature < 1e-8 {
-			self.principal_variation(1).get(0).cloned()
+			self.principal_variation(1).first().cloned()
 		} else {
 			self.select_move_by_temperature(temperature)
 		}
@@ -566,7 +565,7 @@ where
 			let n1 = search.manager.search_tree.num_nodes();
 			std::thread::sleep(Duration::from_secs(1));
 			let n2 = search.manager.search_tree.num_nodes();
-			let diff = if n2 > n1 { n2 - n1 } else { 0 };
+			let diff = n2.saturating_sub(n1);
 			f(diff);
 		}
 	}

@@ -176,7 +176,7 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for AlphaGoPolicy {
 					fpu
 				} else {
 					let sum_rewards = mov.sum_rewards() as f64;
-					let policy_evaln = *mov.move_evaluation() as f64;
+					let policy_evaln = *mov.move_evaluation();
 					(sum_rewards + explore_coef * policy_evaln) * self.reciprocal(child_visits as usize)
 				}
 			})
@@ -187,7 +187,7 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for AlphaGoPolicy {
 		for &x in evalns {
 			assert!(x >= -1e-6, "Move evaluation is {} (must be non-negative)", x);
 		}
-		if evalns.len() >= 1 {
+		if !evalns.is_empty() {
 			let evaln_sum: f64 = evalns.iter().sum();
 			assert!(
 				(evaln_sum - 1.0).abs() < 0.1,
@@ -268,9 +268,7 @@ fn sample_dirichlet(rng: &mut SmallRng, alpha: f64, n: usize) -> Vec<f64> {
 	} else {
 		// Fallback to uniform if all gamma samples are zero
 		let uniform = 1.0 / n as f64;
-		for s in &mut samples {
-			*s = uniform;
-		}
+		samples.fill(uniform);
 	}
 	samples
 }
@@ -300,7 +298,7 @@ impl PolicyRng {
 	{
 		let mut choice = None;
 		let mut num_optimal: u32 = 0;
-		let mut best_so_far: f64 = std::f64::NEG_INFINITY;
+		let mut best_so_far: f64 = f64::NEG_INFINITY;
 		for elt in elts {
 			let score = key_fn(&elt);
 			if score > best_so_far {

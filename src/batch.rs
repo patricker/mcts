@@ -91,6 +91,7 @@ struct EvalRequest<Spec: MCTS, SE> {
 /// let mcts = MCTSManager::new(state, MyMCTS, bridge, policy, table);
 /// mcts.playout_n_parallel(10000, 4);
 /// ```
+#[allow(clippy::type_complexity)]
 pub struct BatchedEvaluatorBridge<Spec: MCTS, B: BatchEvaluator<Spec>> {
 	sender: Option<Mutex<mpsc::Sender<EvalRequest<Spec, B::StateEvaluation>>>>,
 	batch_eval: Arc<B>,
