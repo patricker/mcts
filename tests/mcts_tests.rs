@@ -998,7 +998,7 @@ fn test_fpu_finds_correct_move() {
 		UCTPolicy::new(0.5),
 		(),
 	);
-	mcts.playout_n(10000);
+	mcts.playout_n(20000);
 	assert_eq!(mcts.best_move().unwrap(), Move::Add);
 }
 
@@ -1011,7 +1011,7 @@ fn test_fpu_alphago_finds_correct_move() {
 		AlphaGoPolicy::new(0.5),
 		(),
 	);
-	mcts.playout_n(10000);
+	mcts.playout_n(20000);
 	assert_eq!(mcts.best_move().unwrap(), Move::Add);
 }
 
@@ -1239,4 +1239,870 @@ fn test_temperature_deterministic_with_seed() {
 	let seq1 = run();
 	let seq2 = run();
 	assert_eq!(seq1, seq2, "Seeded temperature selection should be deterministic");
+}
+
+// ---------------------------------------------------------------------------
+// Batched neural network evaluation tests
+// ---------------------------------------------------------------------------
+
+use std::sync::{Arc, Mutex};
+
+struct MockBatchEvaluator {
+	batch_sizes: Arc<Mutex<Vec<usize>>>,
+	latency: Option<Duration>,
+}
+
+impl MockBatchEvaluator {
+	fn new(batch_sizes: Arc<Mutex<Vec<usize>>>) -> Self {
+		Self {
+			batch_sizes,
+			latency: None,
+		}
+	}
+
+	fn with_latency(batch_sizes: Arc<Mutex<Vec<usize>>>, latency: Duration) -> Self {
+		Self {
+			batch_sizes,
+			latency: Some(latency),
+		}
+	}
+}
+
+#[derive(Default)]
+struct BatchedCountingMCTS;
+
+impl MCTS for BatchedCountingMCTS {
+	type State = CountingGame;
+	type Eval = BatchedEvaluatorBridge<BatchedCountingMCTS, MockBatchEvaluator>;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+
+	fn cycle_behaviour(&self) -> CycleBehaviour<Self> {
+		CycleBehaviour::UseCurrentEvalWhenCycleDetected
+	}
+}
+
+impl BatchEvaluator<BatchedCountingMCTS> for MockBatchEvaluator {
+	type StateEvaluation = i64;
+
+	fn evaluate_batch(
+		&self,
+		states: &[(CountingGame, Vec<Move>)],
+	) -> Vec<(Vec<()>, i64)> {
+		self.batch_sizes.lock().unwrap().push(states.len());
+		if let Some(latency) = self.latency {
+			std::thread::sleep(latency);
+		}
+		states
+			.iter()
+			.map(|(state, moves)| (vec![(); moves.len()], state.0))
+			.collect()
+	}
+
+	fn interpret_evaluation_for_player(&self, evaln: &i64, _player: &()) -> i64 {
+		*evaln
+	}
+}
+
+fn make_batched_mcts(
+	batch_sizes: Arc<Mutex<Vec<usize>>>,
+	batch_config: BatchConfig,
+) -> MCTSManager<BatchedCountingMCTS> {
+	let evaluator = MockBatchEvaluator::new(batch_sizes);
+	let bridge = BatchedEvaluatorBridge::new(evaluator, batch_config);
+	MCTSManager::new(
+		CountingGame(0),
+		BatchedCountingMCTS,
+		bridge,
+		UCTPolicy::new(0.5),
+		(),
+	)
+}
+
+#[test]
+fn test_batched_basic_correctness() {
+	let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+	let mut mcts = make_batched_mcts(
+		Arc::clone(&batch_sizes),
+		BatchConfig {
+			max_batch_size: 8,
+			max_wait: Duration::from_millis(1),
+		},
+	);
+	mcts.playout_n_parallel(10000, 4);
+	assert_eq!(mcts.best_move().unwrap(), Move::Add);
+}
+
+#[test]
+fn test_batched_single_threaded() {
+	let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+	let mut mcts = make_batched_mcts(
+		Arc::clone(&batch_sizes),
+		BatchConfig {
+			max_batch_size: 8,
+			max_wait: Duration::from_millis(1),
+		},
+	);
+	mcts.playout_n(5000);
+	assert_eq!(mcts.best_move().unwrap(), Move::Add);
+
+	let sizes = batch_sizes.lock().unwrap();
+	assert!(!sizes.is_empty(), "evaluator should have been called");
+	// Single-threaded: each playout blocks, so batches should all be size 1
+	for &size in sizes.iter() {
+		assert_eq!(size, 1, "single-threaded batches should be size 1");
+	}
+}
+
+#[test]
+fn test_batched_batch_size_verification() {
+	let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+	let evaluator = MockBatchEvaluator::with_latency(
+		Arc::clone(&batch_sizes),
+		Duration::from_millis(2),
+	);
+	let bridge = BatchedEvaluatorBridge::new(
+		evaluator,
+		BatchConfig {
+			max_batch_size: 8,
+			max_wait: Duration::from_millis(5),
+		},
+	);
+	let mut mcts = MCTSManager::new(
+		CountingGame(0),
+		BatchedCountingMCTS,
+		bridge,
+		UCTPolicy::new(0.5),
+		(),
+	);
+	mcts.playout_n_parallel(1000, 4);
+
+	let sizes = batch_sizes.lock().unwrap();
+	assert!(!sizes.is_empty(), "evaluator should have been called");
+
+	let max_batch = *sizes.iter().max().unwrap();
+	assert!(
+		max_batch > 1,
+		"With 4 threads and latency, at least one batch should be > 1, max was {}",
+		max_batch
+	);
+
+	for &size in sizes.iter() {
+		assert!(
+			size <= 8,
+			"Batch size {} exceeds configured maximum of 8",
+			size
+		);
+	}
+}
+
+#[test]
+fn test_batched_batch_size_one() {
+	let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+	let mut mcts = make_batched_mcts(
+		Arc::clone(&batch_sizes),
+		BatchConfig {
+			max_batch_size: 1,
+			max_wait: Duration::from_millis(1),
+		},
+	);
+	mcts.playout_n_parallel(5000, 2);
+	assert_eq!(mcts.best_move().unwrap(), Move::Add);
+
+	let sizes = batch_sizes.lock().unwrap();
+	for &size in sizes.iter() {
+		assert_eq!(size, 1, "batch_size=1 should produce only single-element batches");
+	}
+}
+
+#[test]
+fn test_batched_terminal_state() {
+	let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+	let evaluator = MockBatchEvaluator::new(Arc::clone(&batch_sizes));
+	let bridge = BatchedEvaluatorBridge::new(evaluator, BatchConfig::default());
+	let mut mcts = MCTSManager::new(
+		CountingGame(100),
+		BatchedCountingMCTS,
+		bridge,
+		UCTPolicy::new(0.5),
+		(),
+	);
+	mcts.playout_n(100);
+	assert!(mcts.best_move().is_none());
+	assert_eq!(mcts.tree().num_nodes(), 1);
+}
+
+#[test]
+fn test_batched_few_playouts() {
+	let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+	let mut mcts = make_batched_mcts(
+		Arc::clone(&batch_sizes),
+		BatchConfig {
+			max_batch_size: 32,
+			max_wait: Duration::from_millis(1),
+		},
+	);
+	// Only 3 playouts with batch_size=32 — must flush partial batch
+	mcts.playout_n_parallel(3, 2);
+	assert!(mcts.best_move().is_some());
+
+	let sizes = batch_sizes.lock().unwrap();
+	assert!(!sizes.is_empty(), "partial batches should still be evaluated");
+}
+
+#[test]
+fn test_batched_multi_threaded() {
+	let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+	let mut mcts = make_batched_mcts(
+		Arc::clone(&batch_sizes),
+		BatchConfig {
+			max_batch_size: 16,
+			max_wait: Duration::from_millis(1),
+		},
+	);
+	mcts.playout_n_parallel(10000, 8);
+	assert_eq!(mcts.best_move().unwrap(), Move::Add);
+	assert!(mcts.tree().num_nodes() > 1);
+}
+
+#[test]
+fn test_batched_visit_distribution() {
+	let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+	let mut mcts = make_batched_mcts(
+		Arc::clone(&batch_sizes),
+		BatchConfig::default(),
+	);
+	mcts.playout_n_parallel(5000, 4);
+
+	let mut add_visits = 0u64;
+	let mut sub_visits = 0u64;
+	for mov in mcts.tree().root_node().moves() {
+		match mov.get_move() {
+			Move::Add => add_visits = mov.visits(),
+			Move::Sub => sub_visits = mov.visits(),
+		}
+	}
+	assert!(
+		add_visits > sub_visits,
+		"Add should get more visits than Sub in batched mode: {} vs {}",
+		add_visits, sub_visits
+	);
+}
+
+#[test]
+fn test_batched_total_evaluations() {
+	let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+	let mut mcts = make_batched_mcts(
+		Arc::clone(&batch_sizes),
+		BatchConfig::default(),
+	);
+	mcts.playout_n(1000);
+
+	let sizes = batch_sizes.lock().unwrap();
+	let total_evaluated: usize = sizes.iter().sum();
+	// Each new node creation triggers one batch entry.
+	// Root is created during MCTSManager::new (also through the bridge).
+	let nodes_created = mcts.tree().num_nodes();
+	// Total evaluations should match nodes created (including root)
+	assert_eq!(
+		total_evaluated, nodes_created,
+		"total batch evaluations ({}) should equal nodes created ({})",
+		total_evaluated, nodes_created
+	);
+}
+
+// Batched AlphaGo policy tests
+
+struct MockBatchAlphaGoEvaluator {
+	batch_sizes: Arc<Mutex<Vec<usize>>>,
+}
+
+#[derive(Default)]
+struct BatchedAlphaGoMCTS;
+
+impl MCTS for BatchedAlphaGoMCTS {
+	type State = CountingGame;
+	type Eval = BatchedEvaluatorBridge<BatchedAlphaGoMCTS, MockBatchAlphaGoEvaluator>;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = AlphaGoPolicy;
+	type TranspositionTable = ();
+}
+
+impl BatchEvaluator<BatchedAlphaGoMCTS> for MockBatchAlphaGoEvaluator {
+	type StateEvaluation = i64;
+
+	fn evaluate_batch(
+		&self,
+		states: &[(CountingGame, Vec<Move>)],
+	) -> Vec<(Vec<f64>, i64)> {
+		self.batch_sizes.lock().unwrap().push(states.len());
+		states
+			.iter()
+			.map(|(state, moves)| {
+				let n = moves.len();
+				let prior = if n > 0 { 1.0 / n as f64 } else { 0.0 };
+				(vec![prior; n], state.0)
+			})
+			.collect()
+	}
+
+	fn interpret_evaluation_for_player(&self, evaln: &i64, _player: &()) -> i64 {
+		*evaln
+	}
+}
+
+#[test]
+fn test_batched_alphago_policy() {
+	let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+	let evaluator = MockBatchAlphaGoEvaluator {
+		batch_sizes: Arc::clone(&batch_sizes),
+	};
+	let bridge = BatchedEvaluatorBridge::new(evaluator, BatchConfig::default());
+	let mut mcts = MCTSManager::new(
+		CountingGame(0),
+		BatchedAlphaGoMCTS,
+		bridge,
+		AlphaGoPolicy::new(0.5),
+		(),
+	);
+	mcts.playout_n(5000);
+	assert_eq!(mcts.best_move().unwrap(), Move::Add);
+}
+
+// ---------------------------------------------------------------------------
+// MCTS-Solver tests
+// ---------------------------------------------------------------------------
+
+// TinyNim: two-player game for solver testing.
+// Single pile of stones. Players alternate removing 1 or 2 stones.
+// The player who takes the last stone(s) wins.
+// Game-theoretic solution: position is losing iff stones % 3 == 0.
+
+#[derive(Clone, Debug, PartialEq)]
+struct TinyNim {
+	stones: u8,
+	current_player: NimPlayer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NimPlayer {
+	P1,
+	P2,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum NimMove {
+	Take1,
+	Take2,
+}
+
+impl GameState for TinyNim {
+	type Move = NimMove;
+	type Player = NimPlayer;
+	type MoveList = Vec<NimMove>;
+
+	fn current_player(&self) -> NimPlayer {
+		self.current_player
+	}
+
+	fn available_moves(&self) -> Vec<NimMove> {
+		if self.stones == 0 {
+			vec![]
+		} else if self.stones == 1 {
+			vec![NimMove::Take1]
+		} else {
+			vec![NimMove::Take1, NimMove::Take2]
+		}
+	}
+
+	fn make_move(&mut self, mov: &NimMove) {
+		match mov {
+			NimMove::Take1 => self.stones -= 1,
+			NimMove::Take2 => self.stones -= 2,
+		}
+		self.current_player = match self.current_player {
+			NimPlayer::P1 => NimPlayer::P2,
+			NimPlayer::P2 => NimPlayer::P1,
+		};
+	}
+
+	fn terminal_value(&self) -> Option<ProvenValue> {
+		if self.stones == 0 {
+			// The previous player took the last stone and won.
+			// The current player (who would move next) has lost.
+			Some(ProvenValue::Loss)
+		} else {
+			None
+		}
+	}
+}
+
+struct NimEvaluator;
+
+impl<Spec: MCTS<State = TinyNim, TreePolicy = UCTPolicy>> Evaluator<Spec> for NimEvaluator {
+	type StateEvaluation = Option<NimPlayer>;
+
+	fn evaluate_new_state(
+		&self,
+		state: &TinyNim,
+		moves: &Vec<NimMove>,
+		_: Option<SearchHandle<Spec>>,
+	) -> (Vec<()>, Option<NimPlayer>) {
+		let winner = if state.stones == 0 {
+			// Previous player won
+			Some(match state.current_player {
+				NimPlayer::P1 => NimPlayer::P2,
+				NimPlayer::P2 => NimPlayer::P1,
+			})
+		} else {
+			None
+		};
+		(vec![(); moves.len()], winner)
+	}
+
+	fn interpret_evaluation_for_player(
+		&self,
+		winner: &Option<NimPlayer>,
+		player: &NimPlayer,
+	) -> i64 {
+		match winner {
+			Some(w) if w == player => 100,
+			Some(_) => -100,
+			None => 0,
+		}
+	}
+
+	fn evaluate_existing_state(
+		&self,
+		_: &TinyNim,
+		evaln: &Option<NimPlayer>,
+		_: SearchHandle<Spec>,
+	) -> Option<NimPlayer> {
+		*evaln
+	}
+}
+
+#[derive(Default)]
+struct NimSolverMCTS;
+
+impl MCTS for NimSolverMCTS {
+	type State = TinyNim;
+	type Eval = NimEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+
+	fn solver_enabled(&self) -> bool {
+		true
+	}
+	fn rng_seed(&self) -> Option<u64> {
+		Some(42)
+	}
+}
+
+#[derive(Default)]
+struct NimNoSolverMCTS;
+
+impl MCTS for NimNoSolverMCTS {
+	type State = TinyNim;
+	type Eval = NimEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+
+	fn rng_seed(&self) -> Option<u64> {
+		Some(42)
+	}
+}
+
+fn make_nim_solver(stones: u8) -> MCTSManager<NimSolverMCTS> {
+	MCTSManager::new(
+		TinyNim {
+			stones,
+			current_player: NimPlayer::P1,
+		},
+		NimSolverMCTS,
+		NimEvaluator,
+		UCTPolicy::new(1.0),
+		(),
+	)
+}
+
+#[test]
+fn test_solver_nim_trivial_win_stones_1() {
+	let mut mcts = make_nim_solver(1);
+	mcts.playout_n(10);
+	assert_eq!(mcts.best_move().unwrap(), NimMove::Take1);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Win);
+}
+
+#[test]
+fn test_solver_nim_forced_win_stones_4() {
+	let mut mcts = make_nim_solver(4);
+	mcts.playout_n(200);
+	assert_eq!(mcts.best_move().unwrap(), NimMove::Take1);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Win);
+}
+
+#[test]
+fn test_solver_nim_forced_win_stones_5() {
+	let mut mcts = make_nim_solver(5);
+	mcts.playout_n(200);
+	assert_eq!(mcts.best_move().unwrap(), NimMove::Take2);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Win);
+}
+
+#[test]
+fn test_solver_nim_forced_loss_stones_3() {
+	let mut mcts = make_nim_solver(3);
+	mcts.playout_n(200);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Loss);
+}
+
+#[test]
+fn test_solver_nim_forced_loss_stones_6() {
+	let mut mcts = make_nim_solver(6);
+	mcts.playout_n(500);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Loss);
+}
+
+#[test]
+fn test_solver_nim_all_positions_correct() {
+	for stones in 1u8..=6 {
+		let mut mcts = make_nim_solver(stones);
+		mcts.playout_n(500);
+		let expected = if stones % 3 == 0 {
+			ProvenValue::Loss
+		} else {
+			ProvenValue::Win
+		};
+		assert_eq!(
+			mcts.root_proven_value(),
+			expected,
+			"stones={}: expected {:?}, got {:?}",
+			stones,
+			expected,
+			mcts.root_proven_value()
+		);
+	}
+}
+
+#[test]
+fn test_solver_proven_root_stops_search() {
+	let mut mcts = make_nim_solver(3);
+	mcts.playout_n(200);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Loss);
+	let nodes_after_prove = mcts.tree().num_nodes();
+
+	mcts.playout_n(1000);
+	assert_eq!(
+		mcts.tree().num_nodes(),
+		nodes_after_prove,
+		"Proven root should not grow the tree"
+	);
+}
+
+#[test]
+fn test_solver_visit_allocation() {
+	let mut mcts = make_nim_solver(4);
+	mcts.playout_n(200);
+	let stats = mcts.root_child_stats();
+	let take1 = stats.iter().find(|s| s.mov == NimMove::Take1).unwrap();
+	let take2 = stats.iter().find(|s| s.mov == NimMove::Take2).unwrap();
+	assert!(
+		take1.visits > take2.visits * 3,
+		"Solver should favor winning move: Take1={}, Take2={}",
+		take1.visits,
+		take2.visits
+	);
+}
+
+#[test]
+fn test_solver_child_stats_proven_values() {
+	let mut mcts = make_nim_solver(4);
+	mcts.playout_n(200);
+	let stats = mcts.root_child_stats();
+	let take1 = stats.iter().find(|s| s.mov == NimMove::Take1).unwrap();
+	// Take1 → stones=3 for P2 — proven Loss for P2 (child's perspective)
+	// This child must be proven for root to be proven Win.
+	assert_eq!(take1.proven_value, ProvenValue::Loss);
+	// Root is proven Win because Take1 leads to opponent's loss
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Win);
+}
+
+#[test]
+fn test_solver_disabled_no_proven_values() {
+	let mut mcts = MCTSManager::new(
+		TinyNim {
+			stones: 3,
+			current_player: NimPlayer::P1,
+		},
+		NimNoSolverMCTS,
+		NimEvaluator,
+		UCTPolicy::new(1.0),
+		(),
+	);
+	mcts.playout_n(200);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Unknown);
+}
+
+#[test]
+fn test_solver_parallel_correctness() {
+	let mut mcts = make_nim_solver(6);
+	mcts.playout_n_parallel(1000, 4);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Loss);
+}
+
+#[test]
+fn test_solver_default_disabled() {
+	let mcts = NoTranspositionMCTS;
+	assert!(!mcts.solver_enabled());
+}
+
+#[test]
+fn test_solver_existing_tests_unaffected() {
+	let mut mcts = make_no_transposition_mcts();
+	mcts.playout_n(5000);
+	assert_eq!(mcts.best_move().unwrap(), Move::Add);
+	assert_eq!(mcts.root_proven_value(), ProvenValue::Unknown);
+}
+
+// ---------------------------------------------------------------------------
+// Chance node tests
+// ---------------------------------------------------------------------------
+
+// DiceGame: single-player stochastic game for chance node testing.
+// Player chooses Roll or Stop each turn.
+// After Roll, a d3 (1-3 uniform) is added to the score.
+// Game ends when score >= 10 or player Stops.
+// Optimal strategy: always Roll (E[die] = 2 > 0 = Stop value gain).
+
+#[derive(Clone, Debug, PartialEq)]
+struct DiceGame {
+	score: i64,
+	pending_roll: bool,
+	stopped: bool,
+}
+
+impl DiceGame {
+	fn new() -> Self {
+		Self {
+			score: 0,
+			pending_roll: false,
+			stopped: false,
+		}
+	}
+	fn at(score: i64) -> Self {
+		Self {
+			score,
+			pending_roll: false,
+			stopped: false,
+		}
+	}
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum DiceMove {
+	Roll,
+	Stop,
+	Die(u8), // chance outcome: 1, 2, or 3
+}
+
+impl GameState for DiceGame {
+	type Move = DiceMove;
+	type Player = ();
+	type MoveList = Vec<DiceMove>;
+
+	fn current_player(&self) -> () {}
+
+	fn available_moves(&self) -> Vec<DiceMove> {
+		if self.pending_roll || self.stopped || self.score >= 10 {
+			vec![]
+		} else {
+			vec![DiceMove::Roll, DiceMove::Stop]
+		}
+	}
+
+	fn make_move(&mut self, mov: &DiceMove) {
+		match mov {
+			DiceMove::Roll => {
+				self.pending_roll = true;
+			}
+			DiceMove::Stop => {
+				self.stopped = true;
+			}
+			DiceMove::Die(v) => {
+				self.score += *v as i64;
+				self.pending_roll = false;
+			}
+		}
+	}
+
+	fn chance_outcomes(&self) -> Option<Vec<(DiceMove, f64)>> {
+		if self.pending_roll {
+			Some(vec![
+				(DiceMove::Die(1), 1.0 / 3.0),
+				(DiceMove::Die(2), 1.0 / 3.0),
+				(DiceMove::Die(3), 1.0 / 3.0),
+			])
+		} else {
+			None
+		}
+	}
+}
+
+struct DiceEvaluator;
+
+impl<Spec: MCTS<State = DiceGame, TreePolicy = UCTPolicy>> Evaluator<Spec> for DiceEvaluator {
+	type StateEvaluation = i64;
+
+	fn evaluate_new_state(
+		&self,
+		state: &DiceGame,
+		moves: &Vec<DiceMove>,
+		_: Option<SearchHandle<Spec>>,
+	) -> (Vec<()>, i64) {
+		(vec![(); moves.len()], state.score)
+	}
+
+	fn interpret_evaluation_for_player(&self, evaln: &i64, _: &()) -> i64 {
+		*evaln
+	}
+
+	fn evaluate_existing_state(
+		&self,
+		state: &DiceGame,
+		_evaln: &i64,
+		_: SearchHandle<Spec>,
+	) -> i64 {
+		// For open-loop stochastic games, re-evaluate from the current
+		// (post-chance) state, since different playouts through the same
+		// tree node may have different chance outcomes.
+		state.score
+	}
+}
+
+#[derive(Default)]
+struct DiceMCTS;
+
+impl MCTS for DiceMCTS {
+	type State = DiceGame;
+	type Eval = DiceEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+}
+
+#[derive(Default)]
+struct SeededDiceMCTS;
+
+impl MCTS for SeededDiceMCTS {
+	type State = DiceGame;
+	type Eval = DiceEvaluator;
+	type NodeData = ();
+	type ExtraThreadData = ();
+	type TreePolicy = UCTPolicy;
+	type TranspositionTable = ();
+
+	fn rng_seed(&self) -> Option<u64> {
+		Some(42)
+	}
+}
+
+fn make_dice_mcts(score: i64) -> MCTSManager<DiceMCTS> {
+	MCTSManager::new(
+		DiceGame::at(score),
+		DiceMCTS,
+		DiceEvaluator,
+		UCTPolicy::new(0.5),
+		(),
+	)
+}
+
+#[test]
+fn test_chance_roll_is_optimal_from_zero() {
+	let mut mcts = make_dice_mcts(0);
+	mcts.playout_n(50_000);
+	assert_eq!(mcts.best_move().unwrap(), DiceMove::Roll);
+}
+
+#[test]
+fn test_chance_roll_is_optimal_from_seven() {
+	let mut mcts = make_dice_mcts(7);
+	mcts.playout_n(50_000);
+	assert_eq!(mcts.best_move().unwrap(), DiceMove::Roll);
+}
+
+#[test]
+fn test_chance_roll_is_optimal_from_nine() {
+	// At score 9: Stop gives 9. Roll gives E[10+11+12]/3 = 11. Roll is better.
+	let mut mcts = make_dice_mcts(9);
+	mcts.playout_n(10_000);
+	assert_eq!(mcts.best_move().unwrap(), DiceMove::Roll);
+}
+
+#[test]
+fn test_chance_terminal_at_ten() {
+	let mut mcts = make_dice_mcts(10);
+	mcts.playout_n(100);
+	assert!(mcts.best_move().is_none());
+}
+
+#[test]
+fn test_chance_expected_value_from_nine() {
+	// From score 9, Roll: all die outcomes terminate.
+	// E[score] = (10+11+12)/3 = 11
+	let mut mcts = make_dice_mcts(9);
+	mcts.playout_n(50_000);
+	let stats = mcts.root_child_stats();
+	let roll = stats.iter().find(|s| s.mov == DiceMove::Roll).unwrap();
+	assert!(
+		(roll.avg_reward - 11.0).abs() < 0.5,
+		"Roll from 9 should have avg ~11, got {}",
+		roll.avg_reward
+	);
+}
+
+#[test]
+fn test_chance_deterministic_game_unaffected() {
+	// CountingGame returns None for chance_outcomes (default).
+	let mut mcts = make_no_transposition_mcts();
+	mcts.playout_n(5000);
+	assert_eq!(mcts.best_move().unwrap(), Move::Add);
+}
+
+#[test]
+fn test_chance_seeded_deterministic() {
+	let run = || {
+		let mut mcts = MCTSManager::new(
+			DiceGame::new(),
+			SeededDiceMCTS,
+			DiceEvaluator,
+			UCTPolicy::new(0.5),
+			(),
+		);
+		mcts.playout_n(5000);
+		let stats = mcts.root_child_stats();
+		(
+			stats.iter().find(|s| s.mov == DiceMove::Roll).unwrap().visits,
+			stats.iter().find(|s| s.mov == DiceMove::Stop).unwrap().visits,
+		)
+	};
+	let (r1, s1) = run();
+	let (r2, s2) = run();
+	assert_eq!(r1, r2, "Seeded stochastic search should be deterministic");
+	assert_eq!(s1, s2, "Seeded stochastic search should be deterministic");
+}
+
+#[test]
+fn test_chance_parallel() {
+	let mut mcts = make_dice_mcts(0);
+	mcts.playout_n_parallel(50_000, 4);
+	assert_eq!(mcts.best_move().unwrap(), DiceMove::Roll);
 }

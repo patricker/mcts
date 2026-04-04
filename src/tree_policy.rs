@@ -108,10 +108,22 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for UCTPolicy {
 		let adjusted_total = (total_visits + 1) as f64;
 		let ln_adjusted_total = adjusted_total.ln();
 		let fpu = handle.mcts().fpu_value();
+		let solver = handle.mcts().solver_enabled();
 		handle
 			.thread_data()
 			.policy_data
 			.select_by_key(moves, |mov| {
+				if solver {
+					match mov.child_proven_value() {
+						ProvenValue::Loss => return f64::INFINITY,     // child's loss = parent's win
+						ProvenValue::Win => return f64::NEG_INFINITY,  // child's win = parent's loss
+						ProvenValue::Draw => {
+							let cv = mov.visits();
+							return if cv == 0 { 0.0 } else { mov.sum_rewards() as f64 / cv as f64 };
+						}
+						ProvenValue::Unknown => {}
+					}
+				}
 				let sum_rewards = mov.sum_rewards();
 				let child_visits = mov.visits();
 				// http://mcts.ai/pubs/mcts-survey-master.pdf
@@ -143,10 +155,22 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for AlphaGoPolicy {
 		let sqrt_total_visits = (total_visits as f64).sqrt();
 		let explore_coef = self.exploration_constant * sqrt_total_visits;
 		let fpu = handle.mcts().fpu_value();
+		let solver = handle.mcts().solver_enabled();
 		handle
 			.thread_data()
 			.policy_data
 			.select_by_key(moves, |mov| {
+				if solver {
+					match mov.child_proven_value() {
+						ProvenValue::Loss => return f64::INFINITY,
+						ProvenValue::Win => return f64::NEG_INFINITY,
+						ProvenValue::Draw => {
+							let cv = mov.visits();
+							return if cv == 0 { 0.0 } else { mov.sum_rewards() as f64 / cv as f64 };
+						}
+						ProvenValue::Unknown => {}
+					}
+				}
 				let child_visits = mov.visits();
 				if child_visits == 0 && fpu.is_finite() {
 					fpu

@@ -118,10 +118,12 @@
 //! ```
 
 mod atomics;
+pub mod batch;
 mod search_tree;
 pub mod transposition_table;
 pub mod tree_policy;
 
+pub use batch::*;
 pub use search_tree::*;
 use {transposition_table::*, tree_policy::*};
 
@@ -159,6 +161,16 @@ pub trait MCTS: Sized + Send + Sync + 'static {
 		std::usize::MAX
 	}
 	fn select_child_after_search<'a>(&self, children: &'a [MoveInfo<Self>]) -> &'a MoveInfo<Self> {
+		if self.solver_enabled() {
+			// Prefer proven-win children (child's Loss = parent's win)
+			if let Some(winner) = children.iter().find(|c| c.child_proven_value() == ProvenValue::Loss) {
+				return winner;
+			}
+			// Prefer proven-draw over proven-loss
+			if let Some(drawer) = children.iter().find(|c| c.child_proven_value() == ProvenValue::Draw) {
+				return drawer;
+			}
+		}
 		children.into_iter().max_by_key(|child| child.visits()).unwrap()
 	}
 	/// `playout` panics when this length is exceeded. Defaults to one million.
@@ -189,6 +201,13 @@ pub trait MCTS: Sized + Send + Sync + 'static {
 	/// `principal_variation()` always uses argmax regardless of temperature.
 	fn selection_temperature(&self) -> f64 {
 		0.0
+	}
+	/// Enable MCTS-Solver: proven game-theoretic values (win/loss/draw)
+	/// propagate up the tree, and solved subtrees are skipped during selection.
+	/// Requires `GameState::terminal_value()` to classify terminal states.
+	/// Default: false (no solver overhead).
+	fn solver_enabled(&self) -> bool {
+		false
 	}
 	fn on_backpropagation(&self, _evaln: &StateEvaluation<Self>, _handle: SearchHandle<Self>) {}
 	fn cycle_behaviour(&self) -> CycleBehaviour<Self> {
@@ -226,6 +245,7 @@ pub struct ThreadDataFull<Spec: MCTS> {
 	path: VecStorageForReuse<*const MoveInfo<Spec>>,
 	node_path: VecStorageForReuse<*const SearchNode<Spec>>,
 	players: VecStorageForReuse<Player<Spec>>,
+	chance_rng: SmallRng,
 }
 
 impl<Spec: MCTS> Default for ThreadDataFull<Spec>
@@ -238,6 +258,7 @@ where
 			path: VecStorageForReuse::default(),
 			node_path: VecStorageForReuse::default(),
 			players: VecStorageForReuse::default(),
+			chance_rng: SmallRng::from_rng(rand::thread_rng()).unwrap(),
 		}
 	}
 }
@@ -249,6 +270,28 @@ pub type Move<Spec> = <<Spec as MCTS>::State as GameState>::Move;
 pub type MoveList<Spec> = <<Spec as MCTS>::State as GameState>::MoveList;
 pub type Player<Spec> = <<Spec as MCTS>::State as GameState>::Player;
 pub type TreePolicyThreadData<Spec> = <<Spec as MCTS>::TreePolicy as TreePolicy<Spec>>::ThreadLocalData;
+
+/// Game-theoretic proven value for MCTS-Solver.
+/// Stored from the perspective of the player who moved to reach this node.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum ProvenValue {
+	Unknown = 0,
+	Win = 1,
+	Loss = 2,
+	Draw = 3,
+}
+
+impl ProvenValue {
+	pub fn from_u8(v: u8) -> Self {
+		match v {
+			1 => ProvenValue::Win,
+			2 => ProvenValue::Loss,
+			3 => ProvenValue::Draw,
+			_ => ProvenValue::Unknown,
+		}
+	}
+}
 
 pub trait GameState: Clone {
 	type Move: Sync + Send + Clone;
@@ -265,6 +308,30 @@ pub trait GameState: Clone {
 	/// them in priority order when using progressive widening.
 	fn max_children(&self, _visits: u64) -> usize {
 		usize::MAX
+	}
+
+	/// When the state is terminal (no available moves), classify the outcome.
+	/// Returns the proven value from the perspective of the current player
+	/// (the player who would move next, but cannot because the game is over).
+	/// If the current player has lost, return `Some(ProvenValue::Loss)`.
+	/// Default: `None` (solver treats terminal nodes as Unknown).
+	fn terminal_value(&self) -> Option<ProvenValue> {
+		None
+	}
+
+	/// If the current state requires a chance event (dice roll, card draw)
+	/// before the next player decision, return the possible outcomes with
+	/// their probabilities. Outcomes are applied via `make_move()`.
+	///
+	/// Probabilities must be positive and sum to 1.0.
+	/// Return `None` for deterministic transitions (the default).
+	///
+	/// This is called after each `make_move()` during playouts. If the
+	/// result is `Some`, an outcome is sampled and applied, then
+	/// `chance_outcomes()` is checked again (supporting multiple
+	/// consecutive chance events).
+	fn chance_outcomes(&self) -> Option<Vec<(Self::Move, f64)>> {
+		None
 	}
 }
 
@@ -454,6 +521,10 @@ where
 	}
 	pub fn tree(&self) -> &SearchTree<Spec> {
 		&self.search_tree
+	}
+	/// Returns the proven value of the root node (for MCTS-Solver).
+	pub fn root_proven_value(&self) -> ProvenValue {
+		self.search_tree.root_proven_value()
 	}
 	pub fn best_move(&self) -> Option<Move<Spec>> {
 		let temperature = self.search_tree.spec().selection_temperature();

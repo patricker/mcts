@@ -1,4 +1,4 @@
-use rand::{rngs::SmallRng, SeedableRng};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 use {
 	super::*,
@@ -49,6 +49,7 @@ pub struct SearchNode<Spec: MCTS> {
 	data: Spec::NodeData,
 	evaln: StateEvaluation<Spec>,
 	stats: NodeStats,
+	proven: AtomicU8,
 }
 
 impl<Spec: MCTS> SearchNode<Spec> {
@@ -58,7 +59,12 @@ impl<Spec: MCTS> SearchNode<Spec> {
 			data: Default::default(),
 			evaln,
 			stats: NodeStats::new(),
+			proven: AtomicU8::new(ProvenValue::Unknown as u8),
 		}
+	}
+
+	pub fn proven_value(&self) -> ProvenValue {
+		ProvenValue::from_u8(self.proven.load(Ordering::Relaxed))
 	}
 }
 
@@ -99,6 +105,18 @@ impl<Spec: MCTS> MoveInfo<Spec> {
 			None
 		} else {
 			unsafe { Some(NodeHandle { node: &*ptr }) }
+		}
+	}
+
+	/// Returns the proven value of this move's child node.
+	/// Returns `ProvenValue::Unknown` if the child has not been expanded.
+	/// The value is from the child's mover perspective (inverted from parent's).
+	pub fn child_proven_value(&self) -> ProvenValue {
+		let ptr = self.child.load(Ordering::Relaxed);
+		if ptr.is_null() {
+			ProvenValue::Unknown
+		} else {
+			unsafe { (*ptr).proven_value() }
 		}
 	}
 }
@@ -174,6 +192,7 @@ fn create_node<Spec: MCTS>(
 	policy: &Spec::TreePolicy,
 	state: &Spec::State,
 	handle: Option<SearchHandle<Spec>>,
+	solver_enabled: bool,
 ) -> SearchNode<Spec> {
 	let moves = state.available_moves();
 	let (move_eval, state_eval) = eval.evaluate_new_state(&state, &moves, handle);
@@ -184,11 +203,87 @@ fn create_node<Spec: MCTS>(
 		.map(|(m, e)| MoveInfo::new(m, e))
 		.collect();
 	moves.sort_by(|a, b| policy.compare_move_evaluations(&a.move_evaluation, &b.move_evaluation));
-	SearchNode::new(moves, state_eval)
+	let node = SearchNode::new(moves, state_eval);
+	if solver_enabled && node.moves.is_empty() {
+		if let Some(tv) = state.terminal_value() {
+			node.proven.store(tv as u8, Ordering::Relaxed);
+		}
+	}
+	node
+}
+
+/// Attempt to determine a proven value for a node by examining all its children.
+/// Returns Unknown if the node cannot be proven yet.
+///
+/// Convention: proven values are from the current_player's perspective at each node.
+/// - Child's Loss (opponent loses) → parent can Win by choosing this child
+/// - Child's Win (opponent wins) → this move is bad for the parent
+/// - Parent is Loss only if ALL children are Win (no escape)
+/// - Parent is Win if ANY child is Loss (parent picks the winning move)
+fn try_prove_node<Spec: MCTS>(node: &SearchNode<Spec>) -> ProvenValue {
+	if node.moves.is_empty() {
+		return node.proven_value();
+	}
+
+	let mut all_children_proven = true;
+	let mut all_children_win = true; // all Win from child's perspective = all bad for parent
+	let mut has_child_draw = false;
+
+	for move_info in &node.moves {
+		let child_ptr = move_info.child.load(Ordering::Relaxed);
+		if child_ptr.is_null() {
+			return ProvenValue::Unknown;
+		}
+		let child_proven = unsafe { (*child_ptr).proven_value() };
+		match child_proven {
+			ProvenValue::Unknown => {
+				all_children_proven = false;
+				all_children_win = false;
+			}
+			ProvenValue::Win => {
+				// Child's current_player wins → bad for parent (this move loses)
+			}
+			ProvenValue::Loss => {
+				// Child's current_player loses → parent can win by choosing this!
+				return ProvenValue::Win;
+			}
+			ProvenValue::Draw => {
+				has_child_draw = true;
+				all_children_win = false;
+			}
+		}
+	}
+
+	if all_children_proven && all_children_win {
+		// Every move leads to the opponent winning → parent loses
+		return ProvenValue::Loss;
+	}
+
+	if all_children_proven && has_child_draw {
+		// All children are proven, best outcome is a draw
+		return ProvenValue::Draw;
+	}
+
+	ProvenValue::Unknown
 }
 
 fn is_cycle<T>(past: &[&T], current: &T) -> bool {
 	past.iter().any(|x| *x as *const T == current as *const T)
+}
+
+/// Sample from a weighted distribution of chance outcomes.
+fn sample_chance_outcome<'a, M>(outcomes: &'a [(M, f64)], rng: &mut SmallRng) -> &'a M {
+	debug_assert!(!outcomes.is_empty(), "chance_outcomes returned empty vec");
+	let roll: f64 = rng.gen();
+	let mut cumulative = 0.0;
+	for (outcome, prob) in outcomes {
+		cumulative += prob;
+		if roll < cumulative {
+			return outcome;
+		}
+	}
+	// Floating-point rounding: return last outcome
+	&outcomes.last().unwrap().0
 }
 
 impl<Spec: MCTS> SearchTree<Spec> {
@@ -199,7 +294,8 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		eval: Spec::Eval,
 		table: Spec::TranspositionTable,
 	) -> Self {
-		let mut root_node = create_node(&eval, &tree_policy, &state, None);
+		let solver = manager.solver_enabled();
+		let mut root_node = create_node(&eval, &tree_policy, &state, None, solver);
 		if let Some((epsilon, alpha)) = manager.dirichlet_noise() {
 			let mut rng = match manager.rng_seed() {
 				Some(seed) => SmallRng::seed_from_u64(seed.wrapping_add(u64::MAX)),
@@ -231,8 +327,10 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		let mut tld = ThreadDataFull::<Spec>::default();
 		if let Some(base_seed) = self.manager.rng_seed() {
 			let thread_id = self.thread_counter.fetch_add(1, Ordering::Relaxed) as u64;
-			self.tree_policy
-				.seed_thread_data(&mut tld.tld.policy_data, base_seed.wrapping_add(thread_id));
+			let seed = base_seed.wrapping_add(thread_id);
+			self.tree_policy.seed_thread_data(&mut tld.tld.policy_data, seed);
+			// Seed chance RNG with a different offset to avoid correlation
+			tld.chance_rng = SmallRng::seed_from_u64(seed.wrapping_add(0xCAFE_BABE));
 		}
 		tld
 	}
@@ -255,15 +353,31 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		if sentinel.num_nodes >= self.manager.node_limit() {
 			return false;
 		}
+		let solver = self.manager.solver_enabled();
+		// If root is already proven, stop searching
+		if solver && self.root_node.proven_value() != ProvenValue::Unknown {
+			return false;
+		}
 		let mut state = self.root_state.clone();
 		let path: &mut Vec<&MoveInfo<Spec>> = &mut *tld.path.reuse_allocation();
 		let node_path: &mut Vec<&SearchNode<Spec>> = &mut *tld.node_path.reuse_allocation();
 		let players: &mut Vec<Player<Spec>> = &mut *tld.players.reuse_allocation();
+		let chance_rng = &mut tld.chance_rng;
 		let tld = &mut tld.tld;
+
+		// Resolve any pending chance events at the root state
+		while let Some(outcomes) = state.chance_outcomes() {
+			let outcome = sample_chance_outcome(&outcomes, chance_rng);
+			state.make_move(outcome);
+		}
+
 		let mut did_we_create = false;
 		let mut node = &self.root_node;
 		loop {
 			if node.moves.len() == 0 {
+				break;
+			}
+			if solver && node.proven_value() != ProvenValue::Unknown {
 				break;
 			}
 			if path.len() >= self.manager.max_playout_depth() {
@@ -286,6 +400,11 @@ impl<Spec: MCTS> SearchTree<Spec> {
 				self.manager.max_playout_length()
 			);
 			state.make_move(&choice.mov);
+			// Resolve any chance events after the move
+			while let Some(outcomes) = state.chance_outcomes() {
+				let outcome = sample_chance_outcome(&outcomes, chance_rng);
+				state.make_move(outcome);
+			}
 			let (new_node, new_did_we_create) = self.descend(&state, choice, node, tld);
 			node = new_node;
 			did_we_create = new_did_we_create;
@@ -355,6 +474,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
 			&self.tree_policy,
 			state,
 			Some(self.make_handle(current_node, tld)),
+			self.manager.solver_enabled(),
 		);
 		let created = Box::into_raw(Box::new(created));
 		let other_child = choice.child.compare_exchange(null_mut(), created, Ordering::Relaxed, Ordering::Relaxed)
@@ -402,6 +522,56 @@ impl<Spec: MCTS> SearchTree<Spec> {
 		}
 		self.manager
 			.on_backpropagation(&evaln, self.make_handle(&self.root_node, tld));
+
+		// Solver: propagate proven values bottom-up
+		if self.manager.solver_enabled() {
+			self.propagate_proven(path, node_path);
+		}
+	}
+
+	/// Walk the playout path bottom-up, attempting to prove nodes.
+	fn propagate_proven(
+		&self,
+		path: &[&MoveInfo<Spec>],
+		node_path: &[&SearchNode<Spec>],
+	) {
+		// Check each node along the path, starting from the deepest
+		for i in (0..path.len()).rev() {
+			// The child reached by path[i] is at node_path[i] (if it exists)
+			let child_ptr = path[i].child.load(Ordering::Relaxed);
+			if child_ptr.is_null() {
+				break;
+			}
+			let child_proven = unsafe { (*child_ptr).proven_value() };
+			if child_proven == ProvenValue::Unknown {
+				break;
+			}
+
+			// Try to prove the parent node
+			let parent = if i == 0 {
+				&self.root_node
+			} else {
+				node_path[i - 1]
+			};
+
+			// Skip if parent is already proven
+			if parent.proven_value() != ProvenValue::Unknown {
+				continue;
+			}
+
+			let parent_proven = try_prove_node(parent);
+			if parent_proven == ProvenValue::Unknown {
+				break;
+			}
+
+			// Atomically set (Unknown → proven), ignore if already set
+			let _ = parent.proven.compare_exchange(
+				ProvenValue::Unknown as u8,
+				parent_proven as u8,
+				Ordering::Release,
+				Ordering::Relaxed,
+			);
+		}
 	}
 
 	fn make_handle<'a>(&'a self, node: &'a SearchNode<Spec>, tld: &'a mut ThreadData<Spec>) -> SearchHandle<'a, Spec> {
@@ -417,6 +587,10 @@ impl<Spec: MCTS> SearchTree<Spec> {
 	}
 	pub fn root_node(&self) -> NodeHandle<'_, Spec> {
 		NodeHandle { node: &self.root_node }
+	}
+
+	pub fn root_proven_value(&self) -> ProvenValue {
+		self.root_node.proven_value()
 	}
 
 	pub fn principal_variation(&self, num_moves: usize) -> Vec<MoveInfoHandle<'_, Spec>> {
@@ -467,6 +641,7 @@ pub struct ChildStats<Spec: MCTS> {
 	pub visits: u64,
 	pub avg_reward: f64,
 	pub move_evaluation: MoveEvaluation<Spec>,
+	pub proven_value: ProvenValue,
 }
 
 impl<Spec: MCTS> SearchTree<Spec>
@@ -489,6 +664,7 @@ where
 					visits,
 					avg_reward,
 					move_evaluation: mi.move_evaluation().clone(),
+					proven_value: mi.child_proven_value(),
 				}
 			})
 			.collect()
@@ -620,6 +796,9 @@ impl<'a, Spec: MCTS> NodeHandle<'a, Spec> {
 		Moves {
 			iter: self.node.moves.iter(),
 		}
+	}
+	pub fn proven_value(&self) -> ProvenValue {
+		self.node.proven_value()
 	}
 	pub fn into_raw(&self) -> *const () {
 		self.node as *const _ as *const ()
