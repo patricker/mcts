@@ -184,7 +184,8 @@ impl PriorGameUctWasm {
     }
 
     pub fn get_tree(&self, max_depth: u32) -> JsValue {
-        let tree = types::export_tree::<UctConfig>(self.manager.tree().root_node(), max_depth);
+        let tree =
+            types::export_tree::<UctConfig>(self.manager.tree().root_node(), max_depth, &|_| None);
         serde_wasm_bindgen::to_value(&tree).unwrap()
     }
 
@@ -239,7 +240,10 @@ impl PriorGamePuctWasm {
     }
 
     pub fn get_tree(&self, max_depth: u32) -> JsValue {
-        let tree = types::export_tree::<PuctConfig>(self.manager.tree().root_node(), max_depth);
+        let tree =
+            types::export_tree::<PuctConfig>(self.manager.tree().root_node(), max_depth, &|p| {
+                Some(*p)
+            });
         serde_wasm_bindgen::to_value(&tree).unwrap()
     }
 

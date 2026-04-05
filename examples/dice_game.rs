@@ -42,7 +42,7 @@ impl GameState for DiceGame {
     type Player = ();
     type MoveList = Vec<DiceMove>;
 
-    fn current_player(&self) -> () {}
+    fn current_player(&self) -> Self::Player {}
 
     fn available_moves(&self) -> Vec<DiceMove> {
         if self.pending_roll || self.stopped || self.score >= 20 {

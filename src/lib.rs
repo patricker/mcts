@@ -127,7 +127,8 @@ pub use batch::*;
 pub use search_tree::*;
 use {transposition_table::*, tree_policy::*};
 
-use rand::{rngs::SmallRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng};
+use rand_xoshiro::Xoshiro256PlusPlus as Rng64;
 use std::cell::RefCell;
 
 use {
@@ -166,6 +167,9 @@ pub trait MCTS: Sized + Send + Sync + 'static {
         usize::MAX
     }
     /// Select the best child after search completes. Override for custom post-search selection.
+    ///
+    /// # Panics
+    /// Panics if `children` is empty. Only call on non-terminal nodes.
     fn select_child_after_search<'a>(&self, children: &'a [MoveInfo<Self>]) -> &'a MoveInfo<Self> {
         if self.solver_enabled() {
             // Prefer proven-win children (child's Loss = parent's win)
@@ -293,7 +297,7 @@ pub struct ThreadDataFull<Spec: MCTS> {
     path: VecStorageForReuse<*const MoveInfo<Spec>>,
     node_path: VecStorageForReuse<*const SearchNode<Spec>>,
     players: VecStorageForReuse<Player<Spec>>,
-    chance_rng: SmallRng,
+    chance_rng: Rng64,
 }
 
 impl<Spec: MCTS> Default for ThreadDataFull<Spec>
@@ -306,7 +310,7 @@ where
             path: VecStorageForReuse::default(),
             node_path: VecStorageForReuse::default(),
             players: VecStorageForReuse::default(),
-            chance_rng: SmallRng::from_rng(rand::thread_rng()).unwrap(),
+            chance_rng: Rng64::from_rng(rand::thread_rng()).unwrap(),
         }
     }
 }
@@ -338,7 +342,7 @@ pub enum ProvenValue {
 
 impl ProvenValue {
     /// Convert from raw u8 representation. Unknown for unrecognized values.
-    pub fn from_u8(v: u8) -> Self {
+    pub const fn from_u8(v: u8) -> Self {
         match v {
             1 => ProvenValue::Win,
             2 => ProvenValue::Loss,
@@ -365,19 +369,19 @@ impl ScoreBounds {
     };
 
     /// Exact proven value: `lower == upper == v`.
-    pub fn exact(v: i32) -> Self {
+    pub const fn exact(v: i32) -> Self {
         Self { lower: v, upper: v }
     }
 
     /// Returns `true` when bounds have converged (`lower == upper`).
-    pub fn is_proven(&self) -> bool {
+    pub const fn is_proven(&self) -> bool {
         self.lower == self.upper
     }
 }
 
 /// Negate a score bound, mapping sentinels correctly.
 /// `i32::MIN` (unbounded below) becomes `i32::MAX` (unbounded above) and vice versa.
-pub(crate) fn negate_bound(v: i32) -> i32 {
+pub const fn negate_bound(v: i32) -> i32 {
     match v {
         i32::MIN => i32::MAX,
         i32::MAX => i32::MIN,
@@ -470,12 +474,16 @@ pub trait Evaluator<Spec: MCTS>: Sync {
 
 /// Main entry point for running MCTS search. Owns the search tree and provides
 /// methods for running playouts and extracting results.
+///
+/// `MCTSManager` is intentionally `!Sync`: it uses `RefCell<Rng64>` internally
+/// for temperature-based move selection via `best_move()`. The manager coordinates
+/// from a single thread while search threads use their own thread-local data.
 pub struct MCTSManager<Spec: MCTS> {
     search_tree: Arc<SearchTree<Spec>>,
     // thread local data when we have no asynchronous workers
     single_threaded_tld: Option<ThreadDataFull<Spec>>,
     print_on_playout_error: bool,
-    selection_rng: RefCell<SmallRng>,
+    selection_rng: RefCell<Rng64>,
 }
 
 impl<Spec: MCTS> MCTSManager<Spec>
@@ -492,8 +500,8 @@ where
         table: Spec::TranspositionTable,
     ) -> Self {
         let selection_rng = match manager.rng_seed() {
-            Some(seed) => SmallRng::seed_from_u64(seed.wrapping_add(u64::MAX / 2)),
-            None => SmallRng::from_rng(rand::thread_rng()).unwrap(),
+            Some(seed) => Rng64::seed_from_u64(seed.wrapping_add(u64::MAX / 2)),
+            None => Rng64::from_rng(rand::thread_rng()).unwrap(),
         };
         let search_tree = Arc::new(SearchTree::new(state, manager, tree_policy, eval, table));
         let single_threaded_tld = None;
@@ -605,7 +613,7 @@ where
             return;
         }
         assert!(num_threads != 0);
-        let counter = AtomicIsize::new(n as isize);
+        let counter = AtomicI64::new(n as i64);
         let search_tree = &*self.search_tree;
         std::thread::scope(|s| {
             for _ in 0..num_threads {
@@ -623,10 +631,12 @@ where
         });
     }
     /// The principal variation with full move info handles.
+    #[must_use]
     pub fn principal_variation_info(&self, num_moves: usize) -> Vec<MoveInfoHandle<'_, Spec>> {
         self.search_tree.principal_variation(num_moves)
     }
     /// The best sequence of moves found by search.
+    #[must_use]
     pub fn principal_variation(&self, num_moves: usize) -> Vec<Move<Spec>> {
         self.search_tree
             .principal_variation(num_moves)
@@ -635,6 +645,7 @@ where
             .collect()
     }
     /// The principal variation as a sequence of game states.
+    #[must_use]
     pub fn principal_variation_states(&self, num_moves: usize) -> Vec<Spec::State> {
         let moves = self.principal_variation(num_moves);
         let mut states = vec![self.search_tree.root_state().clone()];
@@ -650,14 +661,17 @@ where
         &self.search_tree
     }
     /// Returns the proven value of the root node (for MCTS-Solver).
+    #[must_use]
     pub fn root_proven_value(&self) -> ProvenValue {
         self.search_tree.root_proven_value()
     }
     /// Returns the score bounds of the root node (for Score-Bounded MCTS).
+    #[must_use]
     pub fn root_score_bounds(&self) -> ScoreBounds {
         self.search_tree.root_score_bounds()
     }
     /// The best move found. Uses temperature-based selection if configured.
+    #[must_use]
     pub fn best_move(&self) -> Option<Move<Spec>> {
         let temperature = self.search_tree.spec().selection_temperature();
         if temperature < 1e-8 {
@@ -709,12 +723,13 @@ where
         });
     }
     /// Reset the search tree, keeping the same game state and configuration.
+    #[must_use]
     pub fn reset(self) -> Self {
         let search_tree = Arc::try_unwrap(self.search_tree)
             .unwrap_or_else(|_| panic!("Cannot reset while async search is running"));
         let selection_rng = match search_tree.spec().rng_seed() {
-            Some(seed) => SmallRng::seed_from_u64(seed.wrapping_add(u64::MAX / 2)),
-            None => SmallRng::from_rng(rand::thread_rng()).unwrap(),
+            Some(seed) => Rng64::seed_from_u64(seed.wrapping_add(u64::MAX / 2)),
+            None => Rng64::from_rng(rand::thread_rng()).unwrap(),
         };
         Self {
             search_tree: Arc::new(search_tree.reset()),
@@ -747,6 +762,7 @@ where
     MoveEvaluation<Spec>: Clone,
 {
     /// Visit counts and average rewards for all root children.
+    #[must_use]
     pub fn root_child_stats(&self) -> Vec<ChildStats<Spec>> {
         self.search_tree.root_child_stats()
     }

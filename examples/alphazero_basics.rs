@@ -44,7 +44,7 @@ impl GameState for PriorGame {
     type Player = ();
     type MoveList = Vec<PriorMove>;
 
-    fn current_player(&self) -> () {}
+    fn current_player(&self) -> Self::Player {}
 
     fn available_moves(&self) -> Vec<PriorMove> {
         if self.depth >= 3 {

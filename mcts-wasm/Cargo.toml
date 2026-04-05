@@ -13,6 +13,7 @@ wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 rand = { version = "0.8", features = ["small_rng"] }
+console_error_panic_hook = "0.1"
 
 [dependencies.getrandom]
 version = "0.2"

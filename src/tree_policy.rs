@@ -1,4 +1,5 @@
-use rand::{rngs::SmallRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng};
+use rand_xoshiro::Xoshiro256PlusPlus as Rng64;
 
 use super::*;
 use search_tree::*;
@@ -47,7 +48,7 @@ pub trait TreePolicy<Spec: MCTS<TreePolicy = Self>>: Sync + Sized {
         _moves: &mut [MoveInfo<Spec>],
         _epsilon: f64,
         _alpha: f64,
-        _rng: &mut SmallRng,
+        _rng: &mut Rng64,
     ) {
     }
 }
@@ -299,7 +300,7 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for AlphaGoPolicy {
         moves: &mut [MoveInfo<Spec>],
         epsilon: f64,
         alpha: f64,
-        rng: &mut SmallRng,
+        rng: &mut Rng64,
     ) {
         if moves.is_empty() {
             return;
@@ -313,7 +314,7 @@ impl<Spec: MCTS<TreePolicy = Self>> TreePolicy<Spec> for AlphaGoPolicy {
 }
 
 /// Sample from Gamma(alpha, 1) using Marsaglia-Tsang with Ahrens-Dieter boost for alpha < 1.
-fn sample_gamma(rng: &mut SmallRng, alpha: f64) -> f64 {
+fn sample_gamma(rng: &mut Rng64, alpha: f64) -> f64 {
     if alpha < 1.0 {
         // Ahrens-Dieter boost: Gamma(alpha) = Gamma(alpha+1) * U^(1/alpha)
         let u: f64 = rng.gen();
@@ -325,7 +326,7 @@ fn sample_gamma(rng: &mut SmallRng, alpha: f64) -> f64 {
     loop {
         let x: f64 = loop {
             let x: f64 = rng.gen::<f64>() * 2.0 - 1.0; // uniform(-1, 1)
-            // Box-Muller polar form: rejection-sample on the unit disk
+                                                       // Box-Muller polar form: rejection-sample on the unit disk
             let y: f64 = rng.gen::<f64>() * 2.0 - 1.0;
             let r2 = x * x + y * y;
             if r2 > 0.0 && r2 < 1.0 {
@@ -347,7 +348,7 @@ fn sample_gamma(rng: &mut SmallRng, alpha: f64) -> f64 {
 }
 
 /// Sample from symmetric Dirichlet(alpha, ..., alpha) with n components.
-fn sample_dirichlet(rng: &mut SmallRng, alpha: f64, n: usize) -> Vec<f64> {
+fn sample_dirichlet(rng: &mut Rng64, alpha: f64, n: usize) -> Vec<f64> {
     let mut samples: Vec<f64> = (0..n).map(|_| sample_gamma(rng, alpha)).collect();
     let sum: f64 = samples.iter().sum();
     if sum > 0.0 {
@@ -368,21 +369,21 @@ fn sample_dirichlet(rng: &mut SmallRng, alpha: f64, n: usize) -> Vec<f64> {
 /// Can be seeded for deterministic search via [`MCTS::rng_seed()`].
 #[derive(Clone)]
 pub struct PolicyRng {
-    rng: SmallRng,
+    rng: Rng64,
 }
 
 impl PolicyRng {
     /// Create with a random seed from the system RNG.
     pub fn new() -> Self {
         Self {
-            rng: SmallRng::from_rng(rand::thread_rng()).unwrap(),
+            rng: Rng64::from_rng(rand::thread_rng()).unwrap(),
         }
     }
 
     /// Create with a fixed seed for reproducible search.
     pub fn seeded(seed: u64) -> Self {
         Self {
-            rng: SmallRng::seed_from_u64(seed),
+            rng: Rng64::seed_from_u64(seed),
         }
     }
 

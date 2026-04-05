@@ -1,5 +1,5 @@
 use rand::prelude::*;
-use rand::rngs::SmallRng;
+use rand_xoshiro::Xoshiro256PlusPlus as Rng64;
 use std::sync::Mutex;
 
 use crate::callbacks::{EvalCallbacks, GameCallbacks};
@@ -13,20 +13,22 @@ use crate::callbacks::{EvalCallbacks, GameCallbacks};
 ///
 /// Requires that games have terminal states (i.e., `available_moves()`
 /// eventually returns an empty vec).
+///
+/// When created with `new()`, uses `thread_rng()` for lock-free parallel search.
+/// When created with `with_seed()`, uses a shared seeded RNG for deterministic
+/// single-threaded replay (Mutex serializes parallel access).
 pub struct RandomRollout {
-    rng: Mutex<SmallRng>,
+    rng: Option<Mutex<Rng64>>,
 }
 
 impl RandomRollout {
     pub fn new() -> Self {
-        Self {
-            rng: Mutex::new(SmallRng::from_rng(rand::thread_rng()).unwrap()),
-        }
+        Self { rng: None }
     }
 
     pub fn with_seed(seed: u64) -> Self {
         Self {
-            rng: Mutex::new(SmallRng::seed_from_u64(seed)),
+            rng: Some(Mutex::new(Rng64::seed_from_u64(seed))),
         }
     }
 }
@@ -56,9 +58,15 @@ impl EvalCallbacks for RandomRollout {
             if available.is_empty() {
                 break;
             }
-            let idx = {
-                let mut rng = self.rng.lock().unwrap();
-                rng.gen_range(0..available.len())
+            let idx = match &self.rng {
+                Some(mutex_rng) => {
+                    let mut rng = mutex_rng.lock().unwrap();
+                    rng.gen_range(0..available.len())
+                }
+                None => {
+                    let mut rng = rand::thread_rng();
+                    rng.gen_range(0..available.len())
+                }
             };
             sim.make_move(&available[idx]);
         }

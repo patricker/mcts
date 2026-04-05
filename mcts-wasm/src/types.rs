@@ -44,7 +44,11 @@ fn proven_str(pv: mcts::ProvenValue) -> Option<String> {
 }
 
 /// Walk the search tree to `max_depth`, building a serializable snapshot.
-pub fn export_tree<Spec>(node: mcts::NodeHandle<'_, Spec>, max_depth: u32) -> TreeNodeJS
+pub fn export_tree<Spec>(
+    node: mcts::NodeHandle<'_, Spec>,
+    max_depth: u32,
+    extract_prior: &impl Fn(&mcts::MoveEvaluation<Spec>) -> Option<f64>,
+) -> TreeNodeJS
 where
     Spec: mcts::MCTS,
     mcts::MoveEvaluation<Spec>: std::fmt::Debug,
@@ -61,7 +65,8 @@ where
         total_reward += r;
 
         let child_node = if max_depth > 0 {
-            mi.child().map(|ch| export_tree::<Spec>(ch, max_depth - 1))
+            mi.child()
+                .map(|ch| export_tree::<Spec>(ch, max_depth - 1, extract_prior))
         } else {
             None
         };
@@ -70,7 +75,7 @@ where
             mov: format!("{}", mi.get_move()),
             visits: v,
             avg_reward: if v == 0 { 0.0 } else { r as f64 / v as f64 },
-            prior: None,
+            prior: extract_prior(mi.move_evaluation()),
             child: child_node,
         });
     }

@@ -1,4 +1,5 @@
-use rand::{rngs::SmallRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng};
+use rand_xoshiro::Xoshiro256PlusPlus as Rng64;
 
 use {
     super::*,
@@ -126,7 +127,7 @@ impl<Spec: MCTS> MoveInfo<Spec> {
 
     /// The child node reached by this move, if expanded.
     pub fn child(&self) -> Option<NodeHandle<'_, Spec>> {
-        let ptr = self.child.load(Ordering::Relaxed);
+        let ptr = self.child.load(Ordering::Acquire);
         if ptr.is_null() {
             None
         } else {
@@ -138,7 +139,7 @@ impl<Spec: MCTS> MoveInfo<Spec> {
     /// Returns `ProvenValue::Unknown` if the child has not been expanded.
     /// The value is from the child's mover perspective (inverted from parent's).
     pub fn child_proven_value(&self) -> ProvenValue {
-        let ptr = self.child.load(Ordering::Relaxed);
+        let ptr = self.child.load(Ordering::Acquire);
         if ptr.is_null() {
             ProvenValue::Unknown
         } else {
@@ -150,7 +151,7 @@ impl<Spec: MCTS> MoveInfo<Spec> {
     /// Returns `ScoreBounds::UNBOUNDED` if the child has not been expanded.
     /// Bounds are from the child's current player's perspective.
     pub fn child_score_bounds(&self) -> ScoreBounds {
-        let ptr = self.child.load(Ordering::Relaxed);
+        let ptr = self.child.load(Ordering::Acquire);
         if ptr.is_null() {
             ScoreBounds::UNBOUNDED
         } else {
@@ -213,10 +214,11 @@ where
 
 impl<Spec: MCTS> Drop for MoveInfo<Spec> {
     fn drop(&mut self) {
-        if !self.owned.load(Ordering::SeqCst) {
+        // &mut self guarantees exclusive access — no atomic ordering needed.
+        if !*self.owned.get_mut() {
             return;
         }
-        let ptr = self.child.load(Ordering::SeqCst);
+        let ptr = *self.child.get_mut();
         if !ptr.is_null() {
             unsafe {
                 drop(Box::from_raw(ptr));
@@ -347,7 +349,7 @@ fn try_prove_node<Spec: MCTS>(node: &SearchNode<Spec>) -> ProvenValue {
     let mut has_child_draw = false;
 
     for move_info in &node.moves {
-        let child_ptr = move_info.child.load(Ordering::Relaxed);
+        let child_ptr = move_info.child.load(Ordering::Acquire);
         if child_ptr.is_null() {
             // Can't prove Loss without expanding all children,
             // but keep iterating — a proven-Loss child later in
@@ -401,7 +403,7 @@ fn try_tighten_bounds<Spec: MCTS>(node: &SearchNode<Spec>) -> ScoreBounds {
     let mut best_upper = i32::MIN;
 
     for move_info in &node.moves {
-        let child_ptr = move_info.child.load(Ordering::Relaxed);
+        let child_ptr = move_info.child.load(Ordering::Acquire);
         let (child_lower, child_upper) = if child_ptr.is_null() {
             (i32::MIN, i32::MAX)
         } else {
@@ -437,7 +439,7 @@ fn try_prove_chance_node<Spec: MCTS>(node: &SearchNode<Spec>) -> ProvenValue {
     let mut all_win = true;
     let mut all_loss = true;
     for mi in &node.moves {
-        let ptr = mi.child.load(Ordering::Relaxed);
+        let ptr = mi.child.load(Ordering::Acquire);
         if ptr.is_null() {
             return ProvenValue::Unknown;
         }
@@ -475,7 +477,7 @@ fn try_tighten_bounds_chance<Spec: MCTS>(node: &SearchNode<Spec>) -> ScoreBounds
     let mut upper_sum: f64 = 0.0;
 
     for (mi, &prob) in node.moves.iter().zip(node.chance_probs.iter()) {
-        let ptr = mi.child.load(Ordering::Relaxed);
+        let ptr = mi.child.load(Ordering::Acquire);
         if ptr.is_null() {
             return ScoreBounds::UNBOUNDED;
         }
@@ -497,7 +499,7 @@ fn try_tighten_bounds_chance<Spec: MCTS>(node: &SearchNode<Spec>) -> ScoreBounds
 /// Sample a child from a chance node by probability.
 fn sample_chance_child<'a, Spec: MCTS>(
     node: &'a SearchNode<Spec>,
-    rng: &mut SmallRng,
+    rng: &mut Rng64,
 ) -> &'a MoveInfo<Spec> {
     debug_assert!(node.is_chance);
     debug_assert!(!node.moves.is_empty(), "chance node has no outcomes");
@@ -517,7 +519,7 @@ fn is_cycle<T>(past: &[&T], current: &T) -> bool {
 }
 
 /// Sample from a weighted distribution of chance outcomes.
-fn sample_chance_outcome<'a, M>(outcomes: &'a [(M, f64)], rng: &mut SmallRng) -> &'a M {
+fn sample_chance_outcome<'a, M>(outcomes: &'a [(M, f64)], rng: &mut Rng64) -> &'a M {
     debug_assert!(!outcomes.is_empty(), "chance_outcomes returned empty vec");
     let roll: f64 = rng.gen();
     let mut cumulative = 0.0;
@@ -554,8 +556,8 @@ impl<Spec: MCTS> SearchTree<Spec> {
         );
         if let Some((epsilon, alpha)) = manager.dirichlet_noise() {
             let mut rng = match manager.rng_seed() {
-                Some(seed) => SmallRng::seed_from_u64(seed.wrapping_add(u64::MAX)),
-                None => SmallRng::from_rng(rand::thread_rng()).unwrap(),
+                Some(seed) => Rng64::seed_from_u64(seed.wrapping_add(u64::MAX)),
+                None => Rng64::from_rng(rand::thread_rng()).unwrap(),
             };
             tree_policy.apply_dirichlet_noise(&mut root_node.moves, epsilon, alpha, &mut rng);
         }
@@ -587,7 +589,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
             self.tree_policy
                 .seed_thread_data(&mut tld.tld.policy_data, seed);
             // Seed chance RNG with a different offset to avoid correlation
-            tld.chance_rng = SmallRng::seed_from_u64(seed.wrapping_add(0xCAFE_BABE));
+            tld.chance_rng = Rng64::seed_from_u64(seed.wrapping_add(0xCAFE_BABE));
         }
         tld
     }
@@ -609,6 +611,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
     }
 
     /// Number of nodes currently in the tree.
+    #[must_use]
     pub fn num_nodes(&self) -> usize {
         self.num_nodes.load(Ordering::SeqCst)
     }
@@ -746,7 +749,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
         current_node: &'b SearchNode<Spec>,
         tld: &'b mut ThreadData<Spec>,
     ) -> (&'a SearchNode<Spec>, bool) {
-        let child = choice.child.load(Ordering::Relaxed);
+        let child = choice.child.load(Ordering::Acquire);
         if !child.is_null() {
             return unsafe { (&*child, false) };
         }
@@ -759,8 +762,8 @@ impl<Spec: MCTS> SearchTree<Spec> {
                 .compare_exchange(
                     null_mut(),
                     node as *const _ as *mut _,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
+                    Ordering::Release,
+                    Ordering::Acquire,
                 )
                 .unwrap_or_else(|x| x);
             if child.is_null() {
@@ -783,7 +786,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
         let created = Box::into_raw(Box::new(created));
         let other_child = choice
             .child
-            .compare_exchange(null_mut(), created, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(null_mut(), created, Ordering::Release, Ordering::Acquire)
             .unwrap_or_else(|x| x);
         if !other_child.is_null() {
             self.expansion_contention_events
@@ -801,14 +804,14 @@ impl<Spec: MCTS> SearchTree<Spec> {
             self.delayed_transposition_table_hits
                 .fetch_add(1, Ordering::Relaxed);
             let existing_ptr = existing as *const _ as *mut _;
-            choice.child.store(existing_ptr, Ordering::Relaxed);
+            choice.child.store(existing_ptr, Ordering::Release);
             self.orphaned
                 .lock()
                 .unwrap()
                 .push(unsafe { Box::from_raw(created) });
             return (existing, false);
         }
-        choice.owned.store(true, Ordering::Relaxed);
+        choice.owned.store(true, Ordering::Release);
         self.num_nodes.fetch_add(1, Ordering::Relaxed);
         unsafe { (&*created, true) }
     }
@@ -832,7 +835,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
             unsafe {
                 self.manager.on_backpropagation(
                     evaln,
-                    self.make_handle(&*move_info.child.load(Ordering::Relaxed), tld),
+                    self.make_handle(&*move_info.child.load(Ordering::Acquire), tld),
                 );
             }
         }
@@ -854,7 +857,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
         // Check each node along the path, starting from the deepest
         for i in (0..path.len()).rev() {
             // The child reached by path[i] is at node_path[i] (if it exists)
-            let child_ptr = path[i].child.load(Ordering::Relaxed);
+            let child_ptr = path[i].child.load(Ordering::Acquire);
             if child_ptr.is_null() {
                 break;
             }
@@ -1015,6 +1018,7 @@ impl<Spec: MCTS> SearchTree<Spec> {
     }
 
     /// Diagnostic string with node counts, transposition hits, and contention events.
+    #[must_use]
     pub fn diagnose(&self) -> String {
         let mut s = String::new();
         s.push_str(&format!(
@@ -1055,6 +1059,40 @@ pub struct ChildStats<Spec: MCTS> {
     pub move_evaluation: MoveEvaluation<Spec>,
     pub proven_value: ProvenValue,
     pub score_bounds: ScoreBounds,
+}
+
+impl<Spec: MCTS> Debug for ChildStats<Spec>
+where
+    Move<Spec>: Debug,
+    MoveEvaluation<Spec>: Debug,
+{
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.debug_struct("ChildStats")
+            .field("mov", &self.mov)
+            .field("visits", &self.visits)
+            .field("avg_reward", &self.avg_reward)
+            .field("move_evaluation", &self.move_evaluation)
+            .field("proven_value", &self.proven_value)
+            .field("score_bounds", &self.score_bounds)
+            .finish()
+    }
+}
+
+impl<Spec: MCTS> Clone for ChildStats<Spec>
+where
+    Move<Spec>: Clone,
+    MoveEvaluation<Spec>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            mov: self.mov.clone(),
+            visits: self.visits,
+            avg_reward: self.avg_reward,
+            move_evaluation: self.move_evaluation.clone(),
+            proven_value: self.proven_value,
+            score_bounds: self.score_bounds,
+        }
+    }
 }
 
 impl<Spec: MCTS> SearchTree<Spec>
@@ -1125,6 +1163,8 @@ pub enum AdvanceError {
     ChildNotOwned,
 }
 
+impl std::error::Error for AdvanceError {}
+
 impl Display for AdvanceError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
@@ -1185,8 +1225,8 @@ where
         // Apply Dirichlet noise to the new root's priors
         if let Some((epsilon, alpha)) = self.manager.dirichlet_noise() {
             let mut rng = match self.manager.rng_seed() {
-                Some(seed) => SmallRng::seed_from_u64(seed.wrapping_add(u64::MAX)),
-                None => SmallRng::from_rng(rand::thread_rng()).unwrap(),
+                Some(seed) => Rng64::seed_from_u64(seed.wrapping_add(u64::MAX)),
+                None => Rng64::from_rng(rand::thread_rng()).unwrap(),
             };
             self.tree_policy.apply_dirichlet_noise(
                 &mut self.root_node.moves,
@@ -1264,6 +1304,12 @@ impl<'a, Spec: 'a + MCTS> Iterator for Moves<'a, Spec> {
     type Item = &'a MoveInfo<Spec>;
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next()
+    }
+}
+
+impl<'a, Spec: 'a + MCTS> ExactSizeIterator for Moves<'a, Spec> {
+    fn len(&self) -> usize {
+        self.iter.len()
     }
 }
 

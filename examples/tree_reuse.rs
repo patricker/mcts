@@ -36,7 +36,7 @@ impl GameState for CountingGame {
     type Player = ();
     type MoveList = Vec<Move>;
 
-    fn current_player(&self) -> () {}
+    fn current_player(&self) -> Self::Player {}
     fn available_moves(&self) -> Vec<Move> {
         if self.0 == 100 {
             vec![]

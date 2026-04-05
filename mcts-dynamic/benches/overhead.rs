@@ -328,7 +328,7 @@ impl GameState for CountingGame {
     fn current_player(&self) {}
 
     fn available_moves(&self) -> Vec<CountingMove> {
-        if self.0 == 100 {
+        if self.0 == 20 {
             vec![]
         } else {
             vec![CountingMove::Add, CountingMove::Sub]
@@ -418,7 +418,7 @@ impl GameCallbacks for DynCountingGame {
     }
 
     fn available_moves(&self) -> Vec<String> {
-        if self.0 == 100 {
+        if self.0 == 20 {
             vec![]
         } else {
             vec!["Add".to_string(), "Sub".to_string()]
@@ -455,7 +455,7 @@ impl EvalCallbacks for DynCountingEval {
 // ===========================================================================
 
 fn bench_counting_native(c: &mut Criterion) {
-    c.bench_function("counting native 100k playouts", |b| {
+    c.bench_function("counting native 10k playouts", |b| {
         b.iter(|| {
             let mut mcts = MCTSManager::new(
                 CountingGame(0),
@@ -464,13 +464,13 @@ fn bench_counting_native(c: &mut Criterion) {
                 AlphaGoPolicy::new(1.5),
                 (),
             );
-            mcts.playout_n(100_000);
+            mcts.playout_n(10_000);
         });
     });
 }
 
 fn bench_counting_dynamic(c: &mut Criterion) {
-    c.bench_function("counting dynamic 100k playouts", |b| {
+    c.bench_function("counting dynamic 10k playouts", |b| {
         b.iter(|| {
             let config = DynConfig {
                 exploration_constant: 1.5,
@@ -482,7 +482,7 @@ fn bench_counting_dynamic(c: &mut Criterion) {
                 Box::new(DynCountingEval),
                 config,
             );
-            mgr.playout_n(100_000);
+            mgr.playout_n(10_000);
         });
     });
 }

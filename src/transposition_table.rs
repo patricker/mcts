@@ -150,8 +150,8 @@ fn get_or_write<'a, V>(ptr: &AtomicPtr<V>, v: &'a V) -> Option<&'a V> {
     let result = ptr.compare_exchange(
         std::ptr::null_mut(),
         v as *const _ as *mut _,
-        Ordering::Relaxed,
-        Ordering::Relaxed,
+        Ordering::Release,
+        Ordering::Acquire,
     );
     convert(result.unwrap_or_else(|x| x))
 }
@@ -189,7 +189,7 @@ where
             let entry = unsafe { self.arr.get_unchecked(posn) };
             let key_here = entry.k.load(Ordering::Relaxed);
             if key_here == my_hash {
-                let value_here = entry.v.load(Ordering::Relaxed);
+                let value_here = entry.v.load(Ordering::Acquire);
                 if !value_here.is_null() {
                     return unsafe { Some(&*value_here) };
                 }
@@ -200,8 +200,8 @@ where
                     .k
                     .compare_exchange(0, my_hash, Ordering::Relaxed, Ordering::Relaxed)
                     .unwrap_or_else(|x| x);
-                self.size.fetch_add(1, Ordering::Relaxed);
                 if key_here == 0 || key_here == my_hash {
+                    self.size.fetch_add(1, Ordering::Relaxed);
                     return get_or_write(&entry.v, value);
                 }
             }
@@ -228,7 +228,7 @@ where
             let entry = unsafe { self.arr.get_unchecked(posn) };
             let key_here = entry.k.load(Ordering::Relaxed);
             if key_here == my_hash {
-                return convert(entry.v.load(Ordering::Relaxed));
+                return convert(entry.v.load(Ordering::Acquire));
             }
             if key_here == 0 {
                 return None;
