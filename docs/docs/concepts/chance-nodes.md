@@ -19,6 +19,8 @@ But it loses information. If the player could know the dice roll before choosing
 
 The same issue arises in card games (what card is drawn), tile games (what tile is revealed), and any system with random transitions. The game tree is no longer a tree of player decisions -- it is a tree of decisions interleaved with nature's random choices.
 
+In **2048**, after every slide move, the game places a random tile (2 with 90% probability, 4 with 10%) on a random empty cell. The player must plan without knowing which tile will appear or where.
+
 ## Open-loop: sample but do not store
 
 Open-loop is the default mode. During each playout, chance events are sampled (dice are rolled, cards are drawn) and applied to the game state. But the tree does not record which outcome occurred. The tree node stores aggregate statistics across all sampled outcomes.
@@ -32,6 +34,14 @@ Over many playouts, each node's statistics converge to the expected value across
 **Convergence.** The law of large numbers guarantees that node statistics converge to the true expected value. The variance introduced by sampling different outcomes on different visits is additional noise on top of the usual MCTS sampling noise, but it averages out at the same rate. Open-loop MCTS retains all the convergence guarantees of standard MCTS.
 
 **When it works.** Open-loop is correct when the player makes decisions before observing the chance outcome, or when the expected value is a sufficient summary. Most board games with dice fit this model: you evaluate a position by averaging over all possible rolls because you cannot condition your strategy on a roll that has not happened yet.
+
+### 2048: A natural open-loop game
+
+2048 is perfectly suited to open-loop MCTS. The player commits to a direction (Up/Down/Left/Right) before learning the tile outcome. Each playout simulates a complete game with different random tile placements, and the statistics naturally average over all possible outcomes.
+
+With open-loop, the tree stores one node per board position (after the slide, before the tile spawn). Different playouts through that node experience different tile spawns, and the node's average reward reflects the expected value across all possibilities.
+
+**[Try it →](/playground)** and watch MCTS evaluate 4 directions against hundreds of random futures.
 
 ## Closed-loop: one node per outcome
 
@@ -99,6 +109,7 @@ Many games fall between these extremes. A good heuristic: if the player observes
 ## When to use which
 
 **Open-loop (default).** Use for most games with randomness. Dice games, card games where you evaluate positions before drawing. Memory efficient, statistically sound, requires no special implementation beyond `chance_outcomes()`.
+- **2048**: Open-loop (tile spawn has ~20 outcomes per step; closed-loop would create massive trees)
 
 **Closed-loop (`closed_loop_chance = true`).** Use when per-outcome strategy matters and the outcome space is small. Poker (knowing which card was dealt changes the optimal play), games with a small number of discrete outcomes (coin flips, d6 rolls). Avoid when the outcome space is large or continuous.
 

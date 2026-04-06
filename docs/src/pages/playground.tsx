@@ -3,17 +3,59 @@ import Layout from '@theme/Layout';
 import BrowserOnly from '@docusaurus/BrowserOnly';
 import styles from './playground.module.css';
 
-const tabs = [
-  { id: 'tictactoe', label: 'Tic-Tac-Toe' },
-  { id: 'connectfour', label: 'Connect Four' },
-  { id: '2048', label: '2048' },
-  { id: 'nim', label: 'Nim' },
-  { id: 'counting', label: 'Counting Game' },
-  { id: 'dice', label: 'Dice Game' },
-  { id: 'compare', label: 'Compare Policies' },
-] as const;
+interface TabInfo {
+  id: string;
+  label: string;
+  description: string;
+  concepts: string;
+}
 
-type TabId = (typeof tabs)[number]['id'];
+const tabs: TabInfo[] = [
+  {
+    id: 'tictactoe',
+    label: 'Tic-Tac-Toe',
+    description: 'Play against MCTS with the solver enabled. Watch it prove that perfect play leads to a draw \u2014 every position is classified as Win, Loss, or Draw.',
+    concepts: 'Two-player games, MCTS-Solver, proven values',
+  },
+  {
+    id: 'connectfour',
+    label: 'Connect Four',
+    description: 'Challenge MCTS to Connect Four. With 10,000 playouts per move, it evaluates every column and picks the strongest. Can you find a weakness?',
+    concepts: 'Deep search, heuristic evaluation, exploration vs exploitation',
+  },
+  {
+    id: '2048',
+    label: '2048',
+    description: 'MCTS suggests moves in 2048 by simulating hundreds of random futures. The random tile spawns make this a stochastic game \u2014 MCTS handles uncertainty naturally.',
+    concepts: 'Stochastic games, open-loop chance nodes, depth-limited search',
+  },
+  {
+    id: 'nim',
+    label: 'Nim',
+    description: 'A classic combinatorial game. MCTS-Solver proves every Nim position \u2014 take 1 or 2 stones, and the solver tells you exactly who wins.',
+    concepts: 'Solver, game theory, terminal values',
+  },
+  {
+    id: 'counting',
+    label: 'Counting Game',
+    description: 'The simplest possible MCTS example. Watch the tree grow as search discovers that incrementing toward 100 is better than decrementing.',
+    concepts: 'Tree growth, visit allocation, basic MCTS',
+  },
+  {
+    id: 'dice',
+    label: 'Dice Game',
+    description: 'Roll or stop \u2014 a simple stochastic game with chance nodes. Each die roll creates a branch in the search tree.',
+    concepts: 'Chance nodes, expected value, risk assessment',
+  },
+  {
+    id: 'compare',
+    label: 'Compare Policies',
+    description: 'See UCT vs PUCT side by side. PUCT uses prior probabilities to guide search, while UCT treats all moves equally until visited.',
+    concepts: 'UCT, PUCT, neural network priors, AlphaGoPolicy',
+  },
+];
+
+type TabId = TabInfo['id'];
 
 function DemoLoader({ tab }: { tab: TabId }) {
   switch (tab) {
@@ -80,6 +122,13 @@ export default function Playground(): JSX.Element {
               {tab.label}
             </button>
           ))}
+        </div>
+
+        <div className={styles.tabDescription}>
+          <p>{tabs.find(t => t.id === activeTab)?.description}</p>
+          <span className={styles.conceptsLabel}>
+            Concepts: {tabs.find(t => t.id === activeTab)?.concepts}
+          </span>
         </div>
 
         <div className={styles.tabContent}>

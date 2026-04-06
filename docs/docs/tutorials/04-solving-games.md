@@ -61,6 +61,18 @@ The solver proves positions as it searches. Call `root_proven_value()` to read t
 
 Nim theory says a position is losing if and only if `stones % 3 == 0`. The solver proves this without knowing the theory -- it discovers the game-theoretic truth through search alone.
 
+### Solving Tic-Tac-Toe
+
+Tic-Tac-Toe is the ideal solver showcase. With only ~5,478 distinct game states, MCTS-Solver proves the entire game tree within a few thousand playouts:
+
+- From an empty board: **Proven Draw** (both players can force a draw with optimal play)
+- After X plays center: **Proven Draw** (O can always equalize)
+- After X plays corner, O plays non-center: **Proven Win for X** (X has a forced win)
+
+**[Try it in the Playground →](/playground)** — play as X and watch MCTS prove each position. The solver badge shows Win/Loss/Draw for the current position, and each move shows its proven value. Notice how MCTS stops searching once a position is fully resolved.
+
+This is exactly what happens in endgame play in production game engines — the solver kicks in when the remaining tree is small enough to prove, saving computation and guaranteeing optimal moves.
+
 ## Score-Bounded MCTS
 
 The solver proves win, loss, or draw -- but some games have scores, not just outcomes. How much did you win by? Score-Bounded MCTS answers that.
@@ -107,6 +119,10 @@ println!("Proven value: {proven:?}");
 `root_score_bounds()` returns a `ScoreBounds { lower, upper }` struct. When `lower == upper`, the exact minimax value is known, and `is_proven()` returns `true`. For the score game above, the bounds converge to `[6, 6]` -- P1's optimal play through branch C yields a minimax value of 6.
 
 Child-level bounds are also available through `root_child_stats()`, so you can inspect how each move's score interval tightened during search.
+
+:::note Solver in the Playground
+Tic-Tac-Toe has solver enabled — positions are proven in real time. Connect Four does not — the tree is too deep for browser-speed proofs, so it relies on heuristic evaluation. This illustrates the practical boundary: solver is powerful but needs a manageable game tree.
+:::
 
 ## What's next
 

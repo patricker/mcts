@@ -18,3 +18,11 @@ The material serves two audiences: those learning MCTS from scratch, and experie
 ## Start here
 
 Begin with [What is MCTS?](/docs/tutorials/01-what-is-mcts) -- it covers the algorithm in 10 minutes with an interactive demo. No code required.
+
+### Learn with real games
+
+The tutorials use simple games to teach concepts, but the [Playground](/playground) lets you experience MCTS on games you already know:
+
+- **Tic-Tac-Toe** — Watch MCTS-Solver prove that perfect play is a draw
+- **Connect Four** — Challenge MCTS to a deeper strategic game
+- **2048** — See how MCTS handles randomness by averaging over possible futures

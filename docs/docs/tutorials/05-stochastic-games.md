@@ -27,6 +27,10 @@ The critical method is `chance_outcomes()`. When a roll is pending, it returns `
 
 MCTS samples from these probabilities during playouts. Over many playouts, the statistics converge to the true expected value (the probability-weighted average across all possible outcomes).
 
+:::tip A game you already know
+The dice game teaches the concept, but **2048** is where it clicks. After every slide, the game randomly places a 2 (90%) or 4 (10%) on an empty tile. MCTS handles this by simulating hundreds of possible futures — different tile placements, different move sequences — and recommending the direction that leads to the highest average score. **[Try 2048 in the Playground →](/playground)**
+:::
+
 ## Open-loop MCTS
 
 By default, chance outcomes use open-loop mode. In open-loop mode, the tree doesn't distinguish between different random outcomes at the same decision point:
@@ -37,6 +41,18 @@ By default, chance outcomes use open-loop mode. In open-loop mode, the tree does
 - Memory-efficient: no per-outcome subtrees.
 
 The tradeoff is that per-outcome information is lost. The tree cannot distinguish "I rolled a 6" from "I rolled a 1" at the same node. For many games, this is fine -- the expected value is what matters for decision-making.
+
+## 2048: Open-Loop in Action
+
+2048 is a natural fit for open-loop MCTS:
+
+1. **The player decides before the RNG fires.** You choose Up/Down/Left/Right, *then* a random tile appears. Your decision can't depend on which tile appears next.
+2. **The outcome space is huge.** After a move, a 2 or 4 could appear in any empty cell. With 10 empty cells, that's 20 possible outcomes. Closed-loop would create 20 child nodes per chance event — memory explodes.
+3. **Averaging works well.** Open-loop samples different tile placements across playouts and averages the results. After 500 playouts, the estimate of "how good is sliding Left?" is reliable regardless of which specific tile appears.
+
+This is the same reason real 2048 AIs use expectimax (averaging over chance) rather than minimax — the randomness is something you plan *around*, not *against*.
+
+In the [Playground](/playground), watch the MCTS analysis panel: each direction shows its average reward across hundreds of simulated futures. The suggested move is the direction with the highest expected score.
 
 ## Evaluating under randomness
 

@@ -16,6 +16,10 @@ MCTS handles two-player games by tracking whose turn it is and flipping the eval
 
 **Prerequisites:** [Your First Search](./02-first-search.md).
 
+:::tip Try it yourself
+While we use Nim as our teaching example (it's simpler to implement), the same concepts apply to any two-player game. **[Play Tic-Tac-Toe against MCTS in the Playground →](/playground)** — the solver proves every position as Win, Loss, or Draw in real time.
+:::
+
 ## Define the game
 
 ```rust reference="examples/nim_solver.rs#nim_game"
@@ -68,6 +72,15 @@ One tree, one selection rule, two players.
 Try Nim below. You play as P1 — pick Take 1 or Take 2 on your turn, then MCTS responds as P2. The solver proves whether each position is winning or losing before you move.
 
 <NimSolverDemo />
+
+## Beyond Nim: Tic-Tac-Toe and Connect Four
+
+Everything you learned here — player alternation, negamax evaluation, `terminal_value()` — works identically for Tic-Tac-Toe and Connect Four. The only differences are board representation and win detection:
+
+- **Tic-Tac-Toe**: 9 cells, 8 winning lines, branching factor ≤ 9. Small enough to solve completely — every position is provably Win, Loss, or Draw.
+- **Connect Four**: 42 cells, gravity-based drops, 4-in-a-row detection. Much deeper trees — MCTS plays strong but can't fully solve it in a browser.
+
+Both are available in the [Playground](/playground). Try them and watch how MCTS allocates visits differently based on position quality — the same negamax evaluation you just learned, working on real games.
 
 ## What's next
 

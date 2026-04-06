@@ -53,6 +53,24 @@
   border-bottom-color: var(--ifm-color-primary);
 }
 
+.tabDescription {
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  background: var(--ifm-color-emphasis-100);
+  border-radius: 6px;
+  font-size: 0.875rem;
+}
+
+.tabDescription p {
+  margin: 0 0 0.25rem 0;
+}
+
+.conceptsLabel {
+  font-size: 0.75rem;
+  color: var(--ifm-color-emphasis-600);
+  font-style: italic;
+}
+
 .tabContent {
   padding: 2rem 0;
 }
