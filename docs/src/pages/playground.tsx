@@ -4,8 +4,11 @@ import BrowserOnly from '@docusaurus/BrowserOnly';
 import styles from './playground.module.css';
 
 const tabs = [
-  { id: 'counting', label: 'Counting Game' },
+  { id: 'tictactoe', label: 'Tic-Tac-Toe' },
+  { id: 'connectfour', label: 'Connect Four' },
+  { id: '2048', label: '2048' },
   { id: 'nim', label: 'Nim' },
+  { id: 'counting', label: 'Counting Game' },
   { id: 'dice', label: 'Dice Game' },
   { id: 'compare', label: 'Compare Policies' },
 ] as const;
@@ -14,6 +17,21 @@ type TabId = (typeof tabs)[number]['id'];
 
 function DemoLoader({ tab }: { tab: TabId }) {
   switch (tab) {
+    case 'tictactoe': {
+      const TicTacToeDemo =
+        require('@site/src/components/demos/TicTacToeDemo').default;
+      return <TicTacToeDemo />;
+    }
+    case 'connectfour': {
+      const ConnectFourDemo =
+        require('@site/src/components/demos/ConnectFourDemo').default;
+      return <ConnectFourDemo />;
+    }
+    case '2048': {
+      const Game2048Demo =
+        require('@site/src/components/demos/Game2048Demo').default;
+      return <Game2048Demo />;
+    }
     case 'counting': {
       const StepThroughDemo =
         require('@site/src/components/demos/StepThroughDemo').default;
@@ -38,7 +56,7 @@ function DemoLoader({ tab }: { tab: TabId }) {
 }
 
 export default function Playground(): JSX.Element {
-  const [activeTab, setActiveTab] = useState<TabId>('counting');
+  const [activeTab, setActiveTab] = useState<TabId>('tictactoe');
 
   return (
     <Layout

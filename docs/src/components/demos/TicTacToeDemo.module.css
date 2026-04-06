@@ -1,0 +1,102 @@
+.board {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  width: 240px;
+  margin: 0 auto 1rem;
+}
+
+.cell {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2rem;
+  font-weight: 700;
+  border: 2px solid var(--ifm-color-emphasis-300);
+  border-radius: 4px;
+  background: var(--ifm-background-surface-color);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.15s;
+  user-select: none;
+  line-height: 1;
+}
+
+.cell:hover:not(.cellDisabled) {
+  background: var(--ifm-color-emphasis-100);
+  border-color: var(--ifm-color-primary);
+}
+
+.cellDisabled {
+  cursor: default;
+}
+
+.cellX {
+  color: #3b82f6;
+}
+
+.cellO {
+  color: #ef4444;
+}
+
+.status {
+  text-align: center;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+}
+
+.controls {
+  display: flex;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.analysisTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+.analysisTable th {
+  text-align: left;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ifm-color-emphasis-600);
+  font-weight: 600;
+  padding: 0.25rem 0.5rem;
+  border-bottom: 1px solid var(--ifm-color-emphasis-200);
+}
+
+.analysisTable td {
+  padding: 0.25rem 0.5rem;
+  border-bottom: 1px solid var(--ifm-color-emphasis-100);
+}
+
+.analysisTable tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.statusCell {
+  font-weight: 600;
+}
+
+.statusCell[data-status='win'] {
+  color: #22c55e;
+}
+
+.statusCell[data-status='loss'] {
+  color: #ef4444;
+}
+
+.statusCell[data-status='draw'] {
+  color: #eab308;
+}
+
+[data-theme='dark'] .cell {
+  border-color: var(--ifm-color-emphasis-400);
+}
