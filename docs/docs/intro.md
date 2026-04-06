@@ -26,3 +26,15 @@ The tutorials use simple games to teach concepts, but the [Playground](/playgrou
 - **Tic-Tac-Toe** — Watch MCTS-Solver prove that perfect play is a draw
 - **Connect Four** — Challenge MCTS to a deeper strategic game
 - **2048** — See how MCTS handles randomness by averaging over possible futures
+
+### Project status
+
+- **123 integration tests**, all passing, plus golden cross-language tests
+- **Zero clippy warnings** — strict Rust linting
+- Lock-free parallel search with correct Acquire/Release memory ordering for ARM
+- Benchmarked: ~250k playouts/sec single-threaded on a trivial game, ~40k playouts/sec on Mancala (realistic two-player)
+- Available on [GitHub](https://github.com/patricker/mcts)
+
+### Using from other languages
+
+The core library is Rust, but a **runtime-polymorphic adapter** (`mcts-dynamic`) enables language bindings without Rust generics. Games and evaluators are defined via trait objects (`GameCallbacks`, `EvalCallbacks`) using strings for moves. Overhead is ~1.4x for realistic games ([benchmarked](https://github.com/patricker/mcts)). WASM bindings power the [Playground](/playground).

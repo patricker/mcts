@@ -12,6 +12,9 @@ Alphabetical definitions of MCTS terms as used in this library.
 **Backpropagation.**
 The phase where a playout's evaluation is propagated from the leaf back up to the root, updating visit counts and reward sums at every node along the path. In this library, `Evaluator::interpret_evaluation_for_player()` converts the evaluation to each ancestor's perspective during backprop. See [Algorithm](../concepts/algorithm.md).
 
+**Branching factor.**
+The average number of legal moves at each game position. Tic-Tac-Toe has branching factor ≤ 9, Chess ~30, Go ~250. Higher branching factors make exhaustive search harder and favor MCTS over minimax.
+
 **Batched evaluation.**
 Processing multiple leaf nodes through the evaluator in a single call, amortizing GPU kernel launch overhead. Implemented via `BatchEvaluator` and `BatchedEvaluatorBridge`, which collects pending evaluations from search threads and dispatches them as a batch. See [Batched Evaluation](../how-to/batched-evaluation.md).
 
@@ -45,6 +48,9 @@ The value assigned to unvisited children during selection. Configured via `MCTS:
 **GameState.**
 The trait defining game rules: legal moves, state transitions, current player, and optional features (terminal classification, chance outcomes, progressive widening). Every game implemented with this library starts here. See [Tutorial 2](../tutorials/02-first-search.md) and [Traits Reference](./traits.md).
 
+**Leaf (node).**
+A node at the frontier of the search tree that has been evaluated but not yet expanded into children. Each playout extends the tree by one leaf. Not to be confused with a terminal node (which has no legal moves).
+
 **MCTS-Solver.**
 An extension that propagates proven game-theoretic values (win/loss/draw) up the tree. When a terminal node is proven, its value flows upward: a parent is proven Win if any child is proven Loss (from the child's perspective), and proven Loss if all children are proven Win. Enabled via `MCTS::solver_enabled()`. See [Solver and Bounds](../concepts/solver-and-bounds.md) and [Tutorial 4](../tutorials/04-solving-games.md).
 
@@ -61,7 +67,7 @@ A position in the search tree representing a game state. Contains the list of le
 A stochastic game mode where chance outcomes are sampled during playouts but not stored as separate children in the tree. Multiple outcomes share the same tree node, which blends their statistics. Lower memory than closed-loop but less precise. This is the default behavior when `closed_loop_chance()` returns `false`. Contrast with closed-loop. See [Chance Nodes](../concepts/chance-nodes.md).
 
 **Playout.**
-One complete cycle of selection, expansion, evaluation, and backpropagation from the root to a leaf and back. Also called a "simulation" or "iteration" in MCTS literature. Executed via `MCTSManager::playout()`, `playout_n()`, or `playout_n_parallel()`. See [Algorithm](../concepts/algorithm.md).
+One complete iteration of the MCTS algorithm: selection (walk the tree), expansion (add a leaf), simulation/evaluation (score the leaf), and backpropagation (update statistics along the path). Also called an "iteration" or "rollout" in some literature. Run more playouts for stronger play.
 
 **Principal variation.**
 The best sequence of moves found by search, following the most-visited child at each level. Retrieved via `MCTSManager::principal_variation(depth)`. Always uses argmax selection regardless of temperature. See [Tutorial 2](../tutorials/02-first-search.md).

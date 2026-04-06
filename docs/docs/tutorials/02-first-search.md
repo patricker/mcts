@@ -70,7 +70,7 @@ The `MCTS` trait wires the game, evaluator, tree policy, and transposition table
 
 `playout_n(100_000)` runs 100,000 iterations. Each iteration walks the four phases: select, expand, simulate, backpropagate.
 
-`principal_variation_states(10)` extracts the best sequence of states -- the path the search considers strongest, up to 10 moves deep.
+`principal_variation_states(10)` extracts the **principal variation** (PV) -- the best sequence of moves found by search, following the most-visited child at each level. Think of it as "what MCTS thinks will happen if both sides play optimally." This returns up to 10 states along that path.
 
 `debug_moves()` prints statistics for each child of the root: visit count, average reward, and move name. You'll see `Add` with far more visits and a higher average reward than `Sub`.
 

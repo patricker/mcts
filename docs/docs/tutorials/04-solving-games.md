@@ -14,6 +14,15 @@ Standard MCTS gives statistical estimates: "this move wins 73% of playouts." MCT
 
 **Prerequisites:** [Two-Player Games](./03-two-player-games.md).
 
+:::info Two independent features
+This tutorial covers two separate features that can be used independently:
+
+1. **MCTS-Solver** (first half) — proves positions as Win/Loss/Draw. Enable with `solver_enabled() = true`. Start here.
+2. **Score-Bounded MCTS** (second half) — tracks minimax score bounds. Enable with `score_bounded_enabled() = true`. Skip this on first read if you don't need exact scores.
+
+Most games only need the solver. Score bounds are useful when you care about *margin of victory*, not just win/loss.
+:::
+
 ## How the solver proves nodes
 
 Proven values propagate up the tree after each playout. The rules follow minimax logic:
@@ -50,6 +59,11 @@ The solver proves positions as it searches. Call `root_proven_value()` to read t
 ```rust reference="examples/nim_solver.rs#run_solver"
 ```
 
+Expected output:
+
+```text reference="examples/output/nim_solver.txt"
+```
+
 `root_proven_value()` returns one of four values:
 
 | Value | Meaning |
@@ -72,6 +86,12 @@ Tic-Tac-Toe is the ideal solver showcase. With only ~5,478 distinct game states,
 **[Try it in the Playground →](/playground)** — play as X and watch MCTS prove each position. The solver badge shows Win/Loss/Draw for the current position, and each move shows its proven value. Notice how MCTS stops searching once a position is fully resolved.
 
 This is exactly what happens in endgame play in production game engines — the solver kicks in when the remaining tree is small enough to prove, saving computation and guaranteeing optimal moves.
+
+---
+
+*The rest of this tutorial covers Score-Bounded MCTS — an advanced feature for games with numeric scores. If you only need Win/Loss/Draw classification, skip ahead to [Tutorial 5: Stochastic Games](./05-stochastic-games.md).*
+
+---
 
 ## Score-Bounded MCTS
 

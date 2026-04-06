@@ -13,6 +13,20 @@ Run MCTS playouts across multiple CPU threads to search faster.
 
 **Prerequisites:** Complete [Your First Search](../tutorials/02-first-search).
 
+:::tip Most common pattern: time-controlled search
+For games with a clock (e.g., "2 seconds per move"), use time-based search:
+
+```rust
+use std::time::Duration;
+
+// Search for 2 seconds on 4 threads
+mcts.playout_parallel_for(Duration::from_secs(2), 4);
+let best = mcts.best_move();
+```
+
+This is what tournament engines use. The search runs as many playouts as it can within the budget, then stops. See below for details.
+:::
+
 ## Three parallel APIs
 
 ### Fixed playout count
