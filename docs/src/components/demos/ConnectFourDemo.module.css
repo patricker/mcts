@@ -170,6 +170,7 @@
   margin-bottom: 0.5rem;
   font-size: 0.875rem;
   font-weight: 600;
+  min-height: 1.5rem;
 }
 
 /* ---- Analysis table ---- */

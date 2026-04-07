@@ -110,92 +110,87 @@ impl ConnectFour {
         s
     }
 
-    /// Evaluate from player 0's perspective using window scoring.
-    fn evaluate(&self) -> i64 {
+    /// Evaluate from a specific player's perspective.
+    fn evaluate_for(&self, player: u8) -> i64 {
         let mut score: i64 = 0;
+        let my_cell = Cell::Player(player);
 
         // Center column bonus
         let center = self.cols / 2;
         for row in 0..self.rows {
-            if let Cell::Player(0) = self.board[row][center] {
+            if self.board[row][center] == my_cell {
                 score += 3;
             }
         }
 
-        // Score windows in all directions
-        let p0 = Cell::Player(0);
-
-        // Horizontal windows
-        if self.cols >= self.k {
-            for row in 0..self.rows {
-                for col in 0..=self.cols - self.k {
-                    score += self.score_window_at(row, col, 0, 1, p0);
+        // Score windows in all 4 directions
+        let windows: Vec<(usize, usize, i32, i32)> = {
+            let mut w = Vec::new();
+            // Horizontal
+            if self.cols >= self.k {
+                for row in 0..self.rows {
+                    for col in 0..=self.cols - self.k {
+                        w.push((row, col, 0, 1));
+                    }
                 }
             }
-        }
-
-        // Vertical windows
-        if self.rows >= self.k {
-            for col in 0..self.cols {
+            // Vertical
+            if self.rows >= self.k {
+                for col in 0..self.cols {
+                    for row in 0..=self.rows - self.k {
+                        w.push((row, col, 1, 0));
+                    }
+                }
+            }
+            // Diagonal up-right
+            if self.rows >= self.k && self.cols >= self.k {
                 for row in 0..=self.rows - self.k {
-                    score += self.score_window_at(row, col, 1, 0, p0);
+                    for col in 0..=self.cols - self.k {
+                        w.push((row, col, 1, 1));
+                    }
                 }
             }
-        }
-
-        // Diagonal (up-right) windows
-        if self.rows >= self.k && self.cols >= self.k {
-            for row in 0..=self.rows - self.k {
-                for col in 0..=self.cols - self.k {
-                    score += self.score_window_at(row, col, 1, 1, p0);
+            // Diagonal down-right
+            if self.rows >= self.k && self.cols >= self.k {
+                for row in (self.k - 1)..self.rows {
+                    for col in 0..=self.cols - self.k {
+                        w.push((row, col, -1, 1));
+                    }
                 }
             }
-        }
+            w
+        };
 
-        // Diagonal (down-right) windows
-        if self.rows >= self.k && self.cols >= self.k {
-            for row in (self.k - 1)..self.rows {
-                for col in 0..=self.cols - self.k {
-                    score += self.score_window_at(row, col, -1, 1, p0);
+        for (row, col, dr, dc) in windows {
+            let mut mine = 0usize;
+            let mut empty = 0usize;
+            let mut theirs = 0usize;
+            for step in 0..self.k {
+                let r = (row as i32 + dr * step as i32) as usize;
+                let c = (col as i32 + dc * step as i32) as usize;
+                let cell = self.board[r][c];
+                if cell == my_cell {
+                    mine += 1;
+                } else if cell == Cell::Empty {
+                    empty += 1;
+                } else {
+                    theirs += 1;
                 }
+            }
+            if mine == self.k {
+                score += 1000;
+            } else if theirs == self.k {
+                score -= 1000;
+            } else if mine == self.k - 1 && empty == 1 {
+                score += 50;
+            } else if theirs == self.k - 1 && empty == 1 {
+                score -= 80;
+            } else if mine >= 2 && empty == self.k - mine {
+                score += 5;
             }
         }
 
         score
-    }
-
-    fn score_window_at(&self, row: usize, col: usize, dr: i32, dc: i32, my_cell: Cell) -> i64 {
-        let mut mine = 0;
-        let mut empty = 0;
-        let mut theirs = 0;
-        for step in 0..self.k {
-            let r = (row as i32 + dr * step as i32) as usize;
-            let c = (col as i32 + dc * step as i32) as usize;
-            let cell = self.board[r][c];
-            if cell == my_cell {
-                mine += 1;
-            } else if cell == Cell::Empty {
-                empty += 1;
-            } else {
-                theirs += 1;
-            }
-        }
-        if mine == self.k {
-            return 1000;
-        }
-        if theirs == self.k {
-            return -1000;
-        }
-        if mine == self.k - 1 && empty == 1 {
-            return 50;
-        }
-        if theirs == self.k - 1 && empty == 1 {
-            return -80;
-        }
-        if mine >= 2 && empty == self.k - mine {
-            return 5;
-        }
-        0
     }
 }
 
@@ -242,34 +237,46 @@ impl GameState for ConnectFour {
 
 struct CfEval;
 
+/// The state evaluation stores the player it was evaluated for, plus the score.
+#[derive(Clone, Debug)]
+struct CfStateEval {
+    score: i64,
+    player: u8,
+}
+
 impl Evaluator<CfConfig> for CfEval {
-    type StateEvaluation = i64;
+    type StateEvaluation = CfStateEval;
 
     fn evaluate_new_state(
         &self,
         state: &ConnectFour,
         moves: &Vec<CfMove>,
         _: Option<SearchHandle<CfConfig>>,
-    ) -> (Vec<()>, i64) {
-        (vec![(); moves.len()], state.evaluate())
+    ) -> (Vec<()>, CfStateEval) {
+        let player = state.current;
+        let score = state.evaluate_for(player);
+        (vec![(); moves.len()], CfStateEval { score, player })
     }
 
-    fn interpret_evaluation_for_player(&self, evaln: &i64, player: &u8) -> i64 {
-        // Evaluate is from player 0's perspective
-        if *player == 0 {
-            *evaln
+    fn interpret_evaluation_for_player(&self, evaln: &CfStateEval, player: &u8) -> i64 {
+        if *player == evaln.player {
+            evaln.score
         } else {
-            -*evaln
+            -evaln.score
         }
     }
 
     fn evaluate_existing_state(
         &self,
         state: &ConnectFour,
-        _evaln: &i64,
+        _evaln: &CfStateEval,
         _: SearchHandle<CfConfig>,
-    ) -> i64 {
-        state.evaluate()
+    ) -> CfStateEval {
+        let player = state.current;
+        CfStateEval {
+            score: state.evaluate_for(player),
+            player,
+        }
     }
 }
 
