@@ -180,6 +180,107 @@ impl GameState for ConnectFour {
 
 struct CfEval;
 
+impl CfEval {
+    /// Score a window of 4 cells from one player's perspective.
+    fn score_window(window: &[Cell; 4], player_cell: Cell, opp_cell: Cell) -> i64 {
+        let mine = window.iter().filter(|&&c| c == player_cell).count();
+        let theirs = window.iter().filter(|&&c| c == opp_cell).count();
+        let empty = window.iter().filter(|&&c| c == Cell::Empty).count();
+
+        if mine == 4 {
+            return 1000;
+        }
+        if theirs == 4 {
+            return -1000;
+        }
+        // Threat: 3 of mine + 1 empty
+        if mine == 3 && empty == 1 {
+            return 50;
+        }
+        // Opponent threat: 3 of theirs + 1 empty
+        if theirs == 3 && empty == 1 {
+            return -80; // Penalize more — blocking is urgent
+        }
+        if mine == 2 && empty == 2 {
+            return 5;
+        }
+        if theirs == 2 && empty == 2 {
+            return -5;
+        }
+        0
+    }
+
+    /// Evaluate the board from Red's perspective.
+    fn evaluate_board(state: &ConnectFour) -> i64 {
+        let mut score: i64 = 0;
+        let red = Cell::Red;
+        let yellow = Cell::Yellow;
+
+        // Center column bonus
+        for row in 0..ROWS {
+            if state.board[row][3] == red {
+                score += 3;
+            } else if state.board[row][3] == yellow {
+                score -= 3;
+            }
+        }
+
+        // Score all horizontal windows of 4
+        for row in 0..ROWS {
+            for col in 0..COLS - 3 {
+                let w = [
+                    state.board[row][col],
+                    state.board[row][col + 1],
+                    state.board[row][col + 2],
+                    state.board[row][col + 3],
+                ];
+                score += Self::score_window(&w, red, yellow);
+            }
+        }
+
+        // Score all vertical windows of 4
+        for col in 0..COLS {
+            for row in 0..ROWS - 3 {
+                let w = [
+                    state.board[row][col],
+                    state.board[row + 1][col],
+                    state.board[row + 2][col],
+                    state.board[row + 3][col],
+                ];
+                score += Self::score_window(&w, red, yellow);
+            }
+        }
+
+        // Score all diagonal (up-right) windows
+        for row in 0..ROWS - 3 {
+            for col in 0..COLS - 3 {
+                let w = [
+                    state.board[row][col],
+                    state.board[row + 1][col + 1],
+                    state.board[row + 2][col + 2],
+                    state.board[row + 3][col + 3],
+                ];
+                score += Self::score_window(&w, red, yellow);
+            }
+        }
+
+        // Score all diagonal (down-right) windows
+        for row in 3..ROWS {
+            for col in 0..COLS - 3 {
+                let w = [
+                    state.board[row][col],
+                    state.board[row - 1][col + 1],
+                    state.board[row - 2][col + 2],
+                    state.board[row - 3][col + 3],
+                ];
+                score += Self::score_window(&w, red, yellow);
+            }
+        }
+
+        score
+    }
+}
+
 impl Evaluator<CfConfig> for CfEval {
     type StateEvaluation = i64;
 
@@ -189,18 +290,7 @@ impl Evaluator<CfConfig> for CfEval {
         moves: &Vec<CfMove>,
         _: Option<SearchHandle<CfConfig>>,
     ) -> (Vec<()>, i64) {
-        // Center-control heuristic: count pieces in columns 2-4.
-        let mut score: i64 = 0;
-        for row in 0..ROWS {
-            for col in 2..=4 {
-                match state.board[row][col] {
-                    Cell::Red => score += 1,
-                    Cell::Yellow => score -= 1,
-                    Cell::Empty => {}
-                }
-            }
-        }
-        (vec![(); moves.len()], score)
+        (vec![(); moves.len()], Self::evaluate_board(state))
     }
 
     fn interpret_evaluation_for_player(&self, evaln: &i64, player: &Player) -> i64 {
@@ -212,11 +302,11 @@ impl Evaluator<CfConfig> for CfEval {
 
     fn evaluate_existing_state(
         &self,
-        _: &ConnectFour,
-        evaln: &i64,
+        state: &ConnectFour,
+        _evaln: &i64,
         _: SearchHandle<CfConfig>,
     ) -> i64 {
-        *evaln
+        Self::evaluate_board(state)
     }
 }
 

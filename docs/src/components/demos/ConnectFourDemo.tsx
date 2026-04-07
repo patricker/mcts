@@ -89,7 +89,7 @@ function ConnectFourDemoInner() {
       setTimeout(() => {
         if (!gameRef.current) return;
 
-        gameRef.current.playout_n(10000);
+        gameRef.current.playout_n(50000);
         const bestMove = gameRef.current.best_move();
         const s = gameRef.current.get_stats();
         setStats(s);

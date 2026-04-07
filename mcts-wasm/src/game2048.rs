@@ -324,9 +324,10 @@ impl Game2048Wasm {
         self.manager.best_move().map(|m| format!("{m}"))
     }
 
-    /// Apply a move and advance the tree (preserving search).
-    /// Apply a move and advance the tree.
-    /// Runs a few playouts first if needed to ensure the child is expanded.
+    /// Apply a move by mutating the state and creating a fresh search tree.
+    /// 2048 is stochastic (random tile spawns), so tree reuse via advance()
+    /// doesn't work — each playout sees different random outcomes. Instead,
+    /// we apply the move to get the actual next state and start fresh.
     pub fn apply_move(&mut self, dir: &str) -> bool {
         let d = match dir {
             "Up" => Dir::Up,
@@ -335,11 +336,20 @@ impl Game2048Wasm {
             "Right" => Dir::Right,
             _ => return false,
         };
-        if self.manager.advance(&d).is_ok() {
-            return true;
+        let mut state = self.manager.tree().root_state().clone();
+        if !state.would_change(d) {
+            return false;
         }
-        self.manager.playout_n(100);
-        self.manager.advance(&d).is_ok()
+        state.slide(d);
+        state.spawn_tile();
+        self.manager = MCTSManager::new(
+            state,
+            Game2048Config,
+            Game2048Eval,
+            UCTPolicy::new(1.0),
+            (),
+        );
+        true
     }
 
     pub fn reset(&mut self) {
