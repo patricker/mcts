@@ -4,23 +4,19 @@ use wasm_bindgen::prelude::*;
 
 use crate::types;
 
-// --- Generalized M,N,K game: M cols x N rows, K in a row to win ---
+// --- Generalized M,N,K game: M cols x N rows, K in a row, P players ---
 
 const MAX_COLS: usize = 10;
 const MAX_ROWS: usize = 10;
 const MAX_CELLS: usize = MAX_COLS * MAX_ROWS;
+const MAX_PLAYERS: usize = 4;
+
+const PLAYER_SYMBOLS: [char; MAX_PLAYERS] = ['X', 'O', 'A', 'B'];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cell {
     Empty,
-    X,
-    O,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Player {
-    X,
-    O,
+    Player(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,63 +31,56 @@ impl std::fmt::Display for TttMove {
 #[derive(Clone, Debug)]
 struct TicTacToe {
     board: [Cell; MAX_CELLS],
-    current: Player,
+    current: u8,
     cols: usize,
     rows: usize,
-    k: usize, // k-in-a-row to win
+    k: usize,
+    num_players: usize,
 }
 
 impl TicTacToe {
-    fn new(cols: usize, rows: usize, k: usize) -> Self {
+    fn new(cols: usize, rows: usize, k: usize, num_players: usize) -> Self {
         Self {
             board: [Cell::Empty; MAX_CELLS],
-            current: Player::X,
+            current: 0,
             cols,
             rows,
             k,
+            num_players,
         }
-    }
-
-    fn idx(&self, row: usize, col: usize) -> usize {
-        row * self.cols + col
     }
 
     fn cell_count(&self) -> usize {
         self.cols * self.rows
     }
 
-    fn winner(&self) -> Option<Player> {
+    fn winner(&self) -> Option<u8> {
         let dirs: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
         for r in 0..self.rows {
             for c in 0..self.cols {
-                let cell = self.board[self.idx(r, c)];
-                if cell == Cell::Empty {
-                    continue;
-                }
-                for &(dr, dc) in &dirs {
-                    let mut count = 1;
-                    for step in 1..self.k {
-                        let nr = r as i32 + dr * step as i32;
-                        let nc = c as i32 + dc * step as i32;
-                        if nr < 0
-                            || nr >= self.rows as i32
-                            || nc < 0
-                            || nc >= self.cols as i32
-                        {
-                            break;
+                if let Cell::Player(p) = self.board[r * self.cols + c] {
+                    for &(dr, dc) in &dirs {
+                        let mut count = 1usize;
+                        for step in 1..self.k {
+                            let nr = r as i32 + dr * step as i32;
+                            let nc = c as i32 + dc * step as i32;
+                            if nr < 0
+                                || nr >= self.rows as i32
+                                || nc < 0
+                                || nc >= self.cols as i32
+                            {
+                                break;
+                            }
+                            if self.board[nr as usize * self.cols + nc as usize] == Cell::Player(p)
+                            {
+                                count += 1;
+                            } else {
+                                break;
+                            }
                         }
-                        if self.board[self.idx(nr as usize, nc as usize)] == cell {
-                            count += 1;
-                        } else {
-                            break;
+                        if count >= self.k {
+                            return Some(p);
                         }
-                    }
-                    if count >= self.k {
-                        return match cell {
-                            Cell::X => Some(Player::X),
-                            Cell::O => Some(Player::O),
-                            Cell::Empty => unreachable!(),
-                        };
                     }
                 }
             }
@@ -103,16 +92,13 @@ impl TicTacToe {
         (0..self.cell_count()).all(|i| self.board[i] != Cell::Empty)
     }
 
-    fn result_str(&self) -> &'static str {
+    fn result_str(&self) -> String {
         if let Some(w) = self.winner() {
-            match w {
-                Player::X => "X",
-                Player::O => "O",
-            }
+            format!("{}", w + 1) // 1-indexed for display
         } else if self.board_full() {
-            "Draw"
+            "Draw".to_string()
         } else {
-            ""
+            String::new()
         }
     }
 
@@ -120,19 +106,69 @@ impl TicTacToe {
         (0..self.cell_count())
             .map(|i| match self.board[i] {
                 Cell::Empty => ' ',
-                Cell::X => 'X',
-                Cell::O => 'O',
+                Cell::Player(p) => PLAYER_SYMBOLS.get(p as usize).copied().unwrap_or('?'),
             })
             .collect()
+    }
+
+    /// Evaluate from a specific player's perspective.
+    fn evaluate_for(&self, player: u8) -> i64 {
+        let my_cell = Cell::Player(player);
+        let mut score: i64 = 0;
+
+        let dirs: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
+        for r in 0..self.rows {
+            for c in 0..self.cols {
+                for &(dr, dc) in &dirs {
+                    // Check if window fits
+                    let end_r = r as i32 + dr * (self.k as i32 - 1);
+                    let end_c = c as i32 + dc * (self.k as i32 - 1);
+                    if end_r < 0
+                        || end_r >= self.rows as i32
+                        || end_c < 0
+                        || end_c >= self.cols as i32
+                    {
+                        continue;
+                    }
+
+                    let mut mine = 0usize;
+                    let mut empty = 0usize;
+                    let mut theirs = 0usize;
+                    for step in 0..self.k {
+                        let idx = (r as i32 + dr * step as i32) as usize * self.cols
+                            + (c as i32 + dc * step as i32) as usize;
+                        match self.board[idx] {
+                            c if c == my_cell => mine += 1,
+                            Cell::Empty => empty += 1,
+                            _ => theirs += 1,
+                        }
+                    }
+
+                    if mine == self.k {
+                        score += 1000;
+                    } else if theirs == self.k {
+                        score -= 1000;
+                    } else if mine == self.k - 1 && empty == 1 {
+                        score += 50;
+                    } else if theirs == self.k - 1 && empty == 1 {
+                        score -= 80;
+                    } else if mine >= 2 && theirs == 0 {
+                        score += 5;
+                    }
+                }
+            }
+        }
+
+        score
     }
 }
 
 impl GameState for TicTacToe {
     type Move = TttMove;
-    type Player = Player;
+    type Player = u8;
     type MoveList = Vec<TttMove>;
 
-    fn current_player(&self) -> Player {
+    fn current_player(&self) -> u8 {
         self.current
     }
 
@@ -147,15 +183,8 @@ impl GameState for TicTacToe {
     }
 
     fn make_move(&mut self, mov: &TttMove) {
-        let cell = match self.current {
-            Player::X => Cell::X,
-            Player::O => Cell::O,
-        };
-        self.board[mov.0 as usize] = cell;
-        self.current = match self.current {
-            Player::X => Player::O,
-            Player::O => Player::X,
-        };
+        self.board[mov.0 as usize] = Cell::Player(self.current);
+        self.current = (self.current + 1) % self.num_players as u8;
     }
 
     fn terminal_value(&self) -> Option<ProvenValue> {
@@ -173,28 +202,50 @@ impl GameState for TicTacToe {
 
 struct TttEval;
 
+#[derive(Clone, Debug)]
+struct TttStateEval {
+    score: i64,
+    player: u8,
+}
+
 impl Evaluator<TttConfig> for TttEval {
-    type StateEvaluation = ();
+    type StateEvaluation = TttStateEval;
 
     fn evaluate_new_state(
         &self,
-        _state: &TicTacToe,
+        state: &TicTacToe,
         moves: &Vec<TttMove>,
         _: Option<SearchHandle<TttConfig>>,
-    ) -> (Vec<()>, ()) {
-        (vec![(); moves.len()], ())
+    ) -> (Vec<()>, TttStateEval) {
+        let player = state.current;
+        (
+            vec![(); moves.len()],
+            TttStateEval {
+                score: state.evaluate_for(player),
+                player,
+            },
+        )
     }
 
-    fn interpret_evaluation_for_player(&self, _evaln: &(), _player: &Player) -> i64 {
-        0
+    fn interpret_evaluation_for_player(&self, evaln: &TttStateEval, player: &u8) -> i64 {
+        if *player == evaln.player {
+            evaln.score
+        } else {
+            -evaln.score
+        }
     }
 
     fn evaluate_existing_state(
         &self,
-        _: &TicTacToe,
-        _evaln: &(),
+        state: &TicTacToe,
+        _evaln: &TttStateEval,
         _: SearchHandle<TttConfig>,
-    ) {
+    ) -> TttStateEval {
+        let player = state.current;
+        TttStateEval {
+            score: state.evaluate_for(player),
+            player,
+        }
     }
 }
 
@@ -224,23 +275,25 @@ pub struct TicTacToeWasm {
     cols: usize,
     rows: usize,
     k: usize,
+    num_players: usize,
 }
 
 impl Default for TicTacToeWasm {
     fn default() -> Self {
-        Self::create(3, 3, 3)
+        Self::create(3, 3, 3, 2)
     }
 }
 
 #[wasm_bindgen]
 impl TicTacToeWasm {
-    fn create(cols: usize, rows: usize, k: usize) -> Self {
+    fn create(cols: usize, rows: usize, k: usize, num_players: usize) -> Self {
         let cols = cols.clamp(2, MAX_COLS);
         let rows = rows.clamp(2, MAX_ROWS);
         let k = k.clamp(2, cols.max(rows));
+        let num_players = num_players.clamp(2, MAX_PLAYERS);
         Self {
             manager: MCTSManager::new(
-                TicTacToe::new(cols, rows, k),
+                TicTacToe::new(cols, rows, k, num_players),
                 TttConfig,
                 TttEval,
                 UCTPolicy::new(1.4),
@@ -249,24 +302,26 @@ impl TicTacToeWasm {
             cols,
             rows,
             k,
+            num_players,
         }
     }
 
     #[wasm_bindgen(constructor)]
-    pub fn new(cols: u32, rows: u32, k: u32) -> Self {
-        Self::create(cols as usize, rows as usize, k as usize)
+    pub fn new(cols: u32, rows: u32, k: u32, num_players: u32) -> Self {
+        Self::create(cols as usize, rows as usize, k as usize, num_players as usize)
     }
 
     pub fn cols(&self) -> u32 {
         self.cols as u32
     }
-
     pub fn rows(&self) -> u32 {
         self.rows as u32
     }
-
     pub fn win_length(&self) -> u32 {
         self.k as u32
+    }
+    pub fn num_players(&self) -> u32 {
+        self.num_players as u32
     }
 
     pub fn playout_n(&mut self, n: u32) {
@@ -284,16 +339,13 @@ impl TicTacToeWasm {
         serde_wasm_bindgen::to_value(&tree).unwrap()
     }
 
-    /// Board as string of length cols*rows: ' '=empty, 'X', 'O'. Row-major, top to bottom.
+    /// Board as string: ' '=empty, 'X'=p0, 'O'=p1, 'A'=p2, 'B'=p3. Row-major.
     pub fn get_board(&self) -> String {
         self.manager.tree().root_state().board_string()
     }
 
-    pub fn current_player(&self) -> String {
-        match self.manager.tree().root_state().current {
-            Player::X => "X".into(),
-            Player::O => "O".into(),
-        }
+    pub fn current_player(&self) -> u32 {
+        self.manager.tree().root_state().current as u32
     }
 
     pub fn is_terminal(&self) -> bool {
@@ -301,8 +353,9 @@ impl TicTacToeWasm {
         state.winner().is_some() || state.board_full()
     }
 
+    /// Returns winner as "1","2",etc., "Draw", or "" (not over).
     pub fn result(&self) -> String {
-        self.manager.tree().root_state().result_str().into()
+        self.manager.tree().root_state().result_str()
     }
 
     pub fn root_proven_value(&self) -> String {
@@ -313,7 +366,6 @@ impl TicTacToeWasm {
         self.manager.best_move().map(|m| format!("{m}"))
     }
 
-    /// Apply a move by cell index and advance the tree.
     pub fn apply_move(&mut self, mov: &str) -> bool {
         let idx: u8 = match mov.parse() {
             Ok(v) if (v as usize) < self.cols * self.rows => v,
@@ -329,7 +381,7 @@ impl TicTacToeWasm {
 
     pub fn reset(&mut self) {
         self.manager = MCTSManager::new(
-            TicTacToe::new(self.cols, self.rows, self.k),
+            TicTacToe::new(self.cols, self.rows, self.k, self.num_players),
             TttConfig,
             TttEval,
             UCTPolicy::new(1.4),

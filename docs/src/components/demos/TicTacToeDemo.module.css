@@ -45,6 +45,7 @@
   font-size: 0.9375rem;
   font-weight: 600;
   margin-bottom: 0.75rem;
+  min-height: 1.5rem;
 }
 
 .controls {
