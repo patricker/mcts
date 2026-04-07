@@ -457,7 +457,7 @@ mod tests {
 
     fn play_one_game(playouts: u64) -> (u32, u32) {
         let mut state = Game2048::new();
-        let mut moves = 0u32;
+        let mut _moves = 0u32;
         loop {
             let available: Vec<Dir> = ALL_DIRS
                 .iter()
@@ -479,7 +479,7 @@ mod tests {
             if let Some(best) = mgr.best_move() {
                 state.slide(best);
                 state.spawn_tile();
-                moves += 1;
+                _moves += 1;
             } else {
                 break;
             }
@@ -509,7 +509,7 @@ mod tests {
         let mut worst_score: u32 = u32::MAX;
 
         for i in 0..num_games {
-            let (max_tile, score) = play_one_game(playouts_per_move as u64);
+            let (max_tile, score) = play_one_game(playouts_per_move);
             *max_tile_counts.entry(max_tile).or_insert(0) += 1;
             total_score += score as u64;
             best_score = best_score.max(score);

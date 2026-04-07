@@ -4,7 +4,11 @@ use wasm_bindgen::prelude::*;
 
 use crate::types;
 
-// --- Game ---
+// --- Generalized M,N,K game: M cols x N rows, K in a row to win ---
+
+const MAX_COLS: usize = 10;
+const MAX_ROWS: usize = 10;
+const MAX_CELLS: usize = MAX_COLS * MAX_ROWS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cell {
@@ -30,50 +34,75 @@ impl std::fmt::Display for TttMove {
 
 #[derive(Clone, Debug)]
 struct TicTacToe {
-    board: [Cell; 9],
+    board: [Cell; MAX_CELLS],
     current: Player,
+    cols: usize,
+    rows: usize,
+    k: usize, // k-in-a-row to win
 }
 
-const WIN_LINES: [[usize; 3]; 8] = [
-    [0, 1, 2],
-    [3, 4, 5],
-    [6, 7, 8],
-    [0, 3, 6],
-    [1, 4, 7],
-    [2, 5, 8],
-    [0, 4, 8],
-    [2, 4, 6],
-];
-
 impl TicTacToe {
-    fn new() -> Self {
+    fn new(cols: usize, rows: usize, k: usize) -> Self {
         Self {
-            board: [Cell::Empty; 9],
+            board: [Cell::Empty; MAX_CELLS],
             current: Player::X,
+            cols,
+            rows,
+            k,
         }
     }
 
+    fn idx(&self, row: usize, col: usize) -> usize {
+        row * self.cols + col
+    }
+
+    fn cell_count(&self) -> usize {
+        self.cols * self.rows
+    }
+
     fn winner(&self) -> Option<Player> {
-        for line in &WIN_LINES {
-            let a = self.board[line[0]];
-            let b = self.board[line[1]];
-            let c = self.board[line[2]];
-            if a != Cell::Empty && a == b && b == c {
-                return match a {
-                    Cell::X => Some(Player::X),
-                    Cell::O => Some(Player::O),
-                    Cell::Empty => unreachable!(),
-                };
+        let dirs: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
+        for r in 0..self.rows {
+            for c in 0..self.cols {
+                let cell = self.board[self.idx(r, c)];
+                if cell == Cell::Empty {
+                    continue;
+                }
+                for &(dr, dc) in &dirs {
+                    let mut count = 1;
+                    for step in 1..self.k {
+                        let nr = r as i32 + dr * step as i32;
+                        let nc = c as i32 + dc * step as i32;
+                        if nr < 0
+                            || nr >= self.rows as i32
+                            || nc < 0
+                            || nc >= self.cols as i32
+                        {
+                            break;
+                        }
+                        if self.board[self.idx(nr as usize, nc as usize)] == cell {
+                            count += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if count >= self.k {
+                        return match cell {
+                            Cell::X => Some(Player::X),
+                            Cell::O => Some(Player::O),
+                            Cell::Empty => unreachable!(),
+                        };
+                    }
+                }
             }
         }
         None
     }
 
     fn board_full(&self) -> bool {
-        self.board.iter().all(|c| *c != Cell::Empty)
+        (0..self.cell_count()).all(|i| self.board[i] != Cell::Empty)
     }
 
-    /// Return the result string: "X", "O", "Draw", or "" (not over).
     fn result_str(&self) -> &'static str {
         if let Some(w) = self.winner() {
             match w {
@@ -85,6 +114,16 @@ impl TicTacToe {
         } else {
             ""
         }
+    }
+
+    fn board_string(&self) -> String {
+        (0..self.cell_count())
+            .map(|i| match self.board[i] {
+                Cell::Empty => ' ',
+                Cell::X => 'X',
+                Cell::O => 'O',
+            })
+            .collect()
     }
 }
 
@@ -98,15 +137,12 @@ impl GameState for TicTacToe {
     }
 
     fn available_moves(&self) -> Vec<TttMove> {
-        // No moves if the game is already won
         if self.winner().is_some() {
             return vec![];
         }
-        self.board
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| **c == Cell::Empty)
-            .map(|(i, _)| TttMove(i as u8))
+        (0..self.cell_count())
+            .filter(|&i| self.board[i] == Cell::Empty)
+            .map(|i| TttMove(i as u8))
             .collect()
     }
 
@@ -124,8 +160,7 @@ impl GameState for TicTacToe {
 
     fn terminal_value(&self) -> Option<ProvenValue> {
         if self.winner().is_some() {
-            // The winner just moved, so current player lost
-            Some(ProvenValue::Loss)
+            Some(ProvenValue::Loss) // winner just moved, current player lost
         } else if self.board_full() {
             Some(ProvenValue::Draw)
         } else {
@@ -186,27 +221,52 @@ impl MCTS for TttConfig {
 #[wasm_bindgen]
 pub struct TicTacToeWasm {
     manager: MCTSManager<TttConfig>,
+    cols: usize,
+    rows: usize,
+    k: usize,
 }
 
 impl Default for TicTacToeWasm {
     fn default() -> Self {
-        Self::new()
+        Self::create(3, 3, 3)
     }
 }
 
 #[wasm_bindgen]
 impl TicTacToeWasm {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
+    fn create(cols: usize, rows: usize, k: usize) -> Self {
+        let cols = cols.clamp(2, MAX_COLS);
+        let rows = rows.clamp(2, MAX_ROWS);
+        let k = k.clamp(2, cols.max(rows));
         Self {
             manager: MCTSManager::new(
-                TicTacToe::new(),
+                TicTacToe::new(cols, rows, k),
                 TttConfig,
                 TttEval,
                 UCTPolicy::new(1.4),
                 (),
             ),
+            cols,
+            rows,
+            k,
         }
+    }
+
+    #[wasm_bindgen(constructor)]
+    pub fn new(cols: u32, rows: u32, k: u32) -> Self {
+        Self::create(cols as usize, rows as usize, k as usize)
+    }
+
+    pub fn cols(&self) -> u32 {
+        self.cols as u32
+    }
+
+    pub fn rows(&self) -> u32 {
+        self.rows as u32
+    }
+
+    pub fn win_length(&self) -> u32 {
+        self.k as u32
     }
 
     pub fn playout_n(&mut self, n: u32) {
@@ -224,18 +284,9 @@ impl TicTacToeWasm {
         serde_wasm_bindgen::to_value(&tree).unwrap()
     }
 
-    /// 9-character string representing the board: ' '=empty, 'X', 'O'.
+    /// Board as string of length cols*rows: ' '=empty, 'X', 'O'. Row-major, top to bottom.
     pub fn get_board(&self) -> String {
-        let state = self.manager.tree().root_state();
-        state
-            .board
-            .iter()
-            .map(|c| match c {
-                Cell::Empty => ' ',
-                Cell::X => 'X',
-                Cell::O => 'O',
-            })
-            .collect()
+        self.manager.tree().root_state().board_string()
     }
 
     pub fn current_player(&self) -> String {
@@ -250,7 +301,6 @@ impl TicTacToeWasm {
         state.winner().is_some() || state.board_full()
     }
 
-    /// Return "X", "O", "Draw", or "" (not over).
     pub fn result(&self) -> String {
         self.manager.tree().root_state().result_str().into()
     }
@@ -263,12 +313,10 @@ impl TicTacToeWasm {
         self.manager.best_move().map(|m| format!("{m}"))
     }
 
-    /// Apply a move by cell index (0-8) and advance the tree.
-    /// Apply a move and advance the tree.
-    /// Runs a few playouts first if needed to ensure the child is expanded.
+    /// Apply a move by cell index and advance the tree.
     pub fn apply_move(&mut self, mov: &str) -> bool {
         let idx: u8 = match mov.parse() {
-            Ok(v) if v < 9 => v,
+            Ok(v) if (v as usize) < self.cols * self.rows => v,
             _ => return false,
         };
         let m = TttMove(idx);
@@ -281,7 +329,7 @@ impl TicTacToeWasm {
 
     pub fn reset(&mut self) {
         self.manager = MCTSManager::new(
-            TicTacToe::new(),
+            TicTacToe::new(self.cols, self.rows, self.k),
             TttConfig,
             TttEval,
             UCTPolicy::new(1.4),

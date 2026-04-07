@@ -19,29 +19,46 @@ interface SearchStats {
 
 type Phase = 'human' | 'mcts' | 'gameover';
 
-const CELL_LABELS = ['top-left', 'top-center', 'top-right', 'mid-left', 'center', 'mid-right', 'bot-left', 'bot-center', 'bot-right'];
+const PLAYOUT_OPTIONS = [
+  { label: '500', value: 500 },
+  { label: '2,000', value: 2000 },
+  { label: '5,000', value: 5000 },
+  { label: '20,000', value: 20000 },
+];
 
 function TicTacToeDemoInner() {
   const { useWasm } = require('../mcts/WasmProvider');
 
   const { wasm, ready, error } = useWasm();
   const gameRef = useRef<any>(null);
+
+  // Settings (applied on New Game)
+  const [settingCols, setSettingCols] = useState(3);
+  const [settingRows, setSettingRows] = useState(3);
+  const [settingK, setSettingK] = useState(3);
+  const [playouts, setPlayouts] = useState(5000);
+
+  // Game state
   const [board, setBoard] = useState('         ');
+  const [cols, setCols] = useState(3);
+  const [rows, setRows] = useState(3);
+  const [k, setK] = useState(3);
   const [phase, setPhase] = useState<Phase>('human');
   const [stats, setStats] = useState<SearchStats | null>(null);
   const [provenValue, setProvenValue] = useState<string>('Unknown');
   const [gameResult, setGameResult] = useState<string>('');
-  const [currentPlayer, setCurrentPlayer] = useState<string>('X');
+
+  const playoutsRef = useRef(5000);
+  useEffect(() => { playoutsRef.current = playouts; }, [playouts]);
 
   const syncState = useCallback(() => {
     if (!gameRef.current) return;
     setBoard(gameRef.current.get_board());
-    setCurrentPlayer(gameRef.current.current_player());
   }, []);
 
   const runAnalysis = useCallback(() => {
-    if (!gameRef.current) return;
-    gameRef.current.playout_n(5000);
+    if (!gameRef.current || gameRef.current.is_terminal()) return;
+    gameRef.current.playout_n(playoutsRef.current);
     const s: SearchStats = gameRef.current.get_stats();
     setStats(s);
     setProvenValue(gameRef.current.root_proven_value());
@@ -52,14 +69,20 @@ function TicTacToeDemoInner() {
     if (gameRef.current) {
       gameRef.current.free();
     }
-    gameRef.current = new wasm.TicTacToeWasm();
+    const c = settingCols;
+    const r = settingRows;
+    const kk = settingK;
+    gameRef.current = new wasm.TicTacToeWasm(c, r, kk);
+    setCols(gameRef.current.cols());
+    setRows(gameRef.current.rows());
+    setK(gameRef.current.win_length());
     setPhase('human');
     setStats(null);
     setProvenValue('Unknown');
     setGameResult('');
     syncState();
     runAnalysis();
-  }, [wasm, syncState, runAnalysis]);
+  }, [wasm, settingCols, settingRows, settingK, syncState, runAnalysis]);
 
   useEffect(() => {
     if (ready) {
@@ -80,13 +103,11 @@ function TicTacToeDemoInner() {
       const currentBoard = gameRef.current.get_board();
       if (currentBoard[index] !== ' ') return;
 
-      // Human plays X
       const success = gameRef.current.apply_move(String(index));
       if (!success) return;
 
       syncState();
 
-      // Check if game is over after human move
       if (gameRef.current.is_terminal()) {
         const result = gameRef.current.result();
         setGameResult(result);
@@ -102,8 +123,7 @@ function TicTacToeDemoInner() {
       setTimeout(() => {
         if (!gameRef.current) return;
 
-        // Run MCTS for O
-        gameRef.current.playout_n(5000);
+        gameRef.current.playout_n(playoutsRef.current);
         const bestMove = gameRef.current.best_move();
 
         if (bestMove) {
@@ -120,10 +140,9 @@ function TicTacToeDemoInner() {
           }
         }
 
-        // Analyze human's new position
         runAnalysis();
         setPhase('human');
-      }, 100);
+      }, 50);
     },
     [phase, syncState, runAnalysis],
   );
@@ -136,19 +155,14 @@ function TicTacToeDemoInner() {
     return <div className={sharedStyles.loading}>Loading...</div>;
   }
 
-  // Compute display labels for proven value.
-  // root_proven_value() is from the current player's perspective.
-  // Before MCTS moves, current player is O, so "Win" means O wins (MCTS wins).
-  // When it's human's turn (X), current player is X, so "Win" means X wins (You win).
+  // Proven value display (from current player's perspective)
   let provenDisplay = provenValue;
   if (phase === 'human') {
-    // Current player is X (human). Proven value is from X's perspective.
     if (provenValue === 'Win') provenDisplay = 'You win';
     else if (provenValue === 'Loss') provenDisplay = 'MCTS wins';
     else if (provenValue === 'Draw') provenDisplay = 'Draw';
   }
 
-  // Game result display
   let resultMessage = '';
   if (phase === 'gameover') {
     if (gameResult === 'X') resultMessage = 'You win!';
@@ -156,38 +170,90 @@ function TicTacToeDemoInner() {
     else if (gameResult === 'Draw') resultMessage = "It's a draw!";
   }
 
-  // Status line
-  let statusText = '';
-  if (phase === 'human') statusText = 'Your turn (X)';
-  else if (phase === 'mcts') statusText = 'MCTS is thinking...';
-
   const provenStatus = provenValue.toLowerCase() as 'win' | 'loss' | 'draw' | 'unknown';
 
-  // For the analysis table, flip proven values since stats are from current player's
-  // perspective (X when it's human's turn), but we want to show from human-friendly view.
-  const displayChildren = stats?.children.map((c) => {
-    // After human moves on cell c.mov, it becomes O's turn. The child's proven value
-    // is from O's perspective in the tree. We display the cell index for clarity.
-    return { ...c };
-  }) ?? [];
+  const displayChildren = (stats?.children ?? [])
+    .slice()
+    .sort((a, b) => b.visits - a.visits);
 
-  // Sort children by visits (descending)
-  displayChildren.sort((a, b) => b.visits - a.visits);
+  const cellSize = cols <= 5 ? 56 : cols <= 7 ? 44 : 36;
+  const fontSize = cols <= 5 ? '1.5rem' : cols <= 7 ? '1.1rem' : '0.9rem';
 
   return (
     <div className={sharedStyles.demo}>
+      {/* Settings */}
+      <div className={styles.settingsRow}>
+        <label className={styles.settingLabel}>
+          <span>Width</span>
+          <select
+            value={settingCols}
+            onChange={(e) => setSettingCols(Number(e.target.value))}
+            className={styles.select}
+          >
+            {[2, 3, 4, 5, 6, 7, 8, 9, 10].map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
+        </label>
+        <label className={styles.settingLabel}>
+          <span>Height</span>
+          <select
+            value={settingRows}
+            onChange={(e) => setSettingRows(Number(e.target.value))}
+            className={styles.select}
+          >
+            {[2, 3, 4, 5, 6, 7, 8, 9, 10].map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
+        </label>
+        <label className={styles.settingLabel}>
+          <span>In a Row</span>
+          <select
+            value={settingK}
+            onChange={(e) => setSettingK(Number(e.target.value))}
+            className={styles.select}
+          >
+            {[2, 3, 4, 5, 6, 7].map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
+        </label>
+        <label className={styles.settingLabel}>
+          <span>Playouts</span>
+          <select
+            value={playouts}
+            onChange={(e) => setPlayouts(Number(e.target.value))}
+            className={styles.select}
+          >
+            {PLAYOUT_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className={styles.boardInfo}>
+        {cols}x{rows}, {k}-in-a-row
+      </div>
+
       {/* Status */}
       <div className={styles.status}>
         {phase === 'mcts' ? (
           <span className={sharedStyles.thinking}>MCTS is thinking...</span>
-        ) : (
-          statusText
-        )}
+        ) : phase === 'human' ? (
+          'Your turn (X)'
+        ) : null}
       </div>
 
       {/* Board */}
-      <div className={styles.board}>
-        {board.split('').map((cell, i) => {
+      <div
+        className={styles.board}
+        style={{
+          gridTemplateColumns: `repeat(${cols}, ${cellSize}px)`,
+        }}
+      >
+        {board.split('').slice(0, cols * rows).map((cell, i) => {
           const cellClasses = [
             styles.cell,
             cell === 'X' ? styles.cellX : '',
@@ -195,13 +261,17 @@ function TicTacToeDemoInner() {
             (phase !== 'human' || cell !== ' ') ? styles.cellDisabled : '',
           ].filter(Boolean).join(' ');
 
+          const row = Math.floor(i / cols);
+          const col = i % cols;
+
           return (
             <button
               key={i}
               className={cellClasses}
+              style={{ width: cellSize, height: cellSize, fontSize }}
               onClick={() => handleCellClick(i)}
               disabled={phase !== 'human' || cell !== ' '}
-              aria-label={`Cell ${CELL_LABELS[i]}: ${cell === ' ' ? 'empty' : cell}`}
+              aria-label={`Row ${row + 1}, Col ${col + 1}: ${cell === ' ' ? 'empty' : cell}`}
             >
               {cell === ' ' ? '' : cell}
             </button>
@@ -223,19 +293,17 @@ function TicTacToeDemoInner() {
       )}
 
       {/* Controls */}
-      {phase !== 'gameover' && (
-        <div className={styles.controls}>
-          <button
-            className="button button--sm button--outline button--danger"
-            onClick={initGame}
-          >
-            New Game
-          </button>
-        </div>
-      )}
+      <div className={styles.controls}>
+        <button
+          className="button button--sm button--outline button--danger"
+          onClick={initGame}
+        >
+          New Game
+        </button>
+      </div>
 
       {/* Proven value badge */}
-      {phase !== 'gameover' && (
+      {phase !== 'gameover' && provenValue !== 'Unknown' && (
         <div className={sharedStyles.section}>
           <span className={sharedStyles.provenValue} data-status={provenStatus}>
             Solver: {provenDisplay}
@@ -259,19 +327,24 @@ function TicTacToeDemoInner() {
               </tr>
             </thead>
             <tbody>
-              {displayChildren.map((c) => (
-                <tr key={c.mov}>
-                  <td>{c.mov}</td>
-                  <td>{c.visits.toLocaleString()}</td>
-                  <td>{c.avg_reward.toFixed(3)}</td>
-                  <td
-                    className={styles.statusCell}
-                    data-status={c.proven?.toLowerCase()}
-                  >
-                    {c.proven ?? '—'}
-                  </td>
-                </tr>
-              ))}
+              {displayChildren.slice(0, 15).map((c) => {
+                const ci = parseInt(c.mov, 10);
+                const cr = Math.floor(ci / cols);
+                const cc = ci % cols;
+                return (
+                  <tr key={c.mov}>
+                    <td>({cr + 1},{cc + 1})</td>
+                    <td>{c.visits.toLocaleString()}</td>
+                    <td>{c.avg_reward.toFixed(3)}</td>
+                    <td
+                      className={styles.statusCell}
+                      data-status={c.proven?.toLowerCase()}
+                    >
+                      {c.proven ?? '—'}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

@@ -1,17 +1,17 @@
 .board {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
   gap: 4px;
-  width: 240px;
+  width: fit-content;
   margin: 0 auto 1rem;
 }
 
 .cell {
-  aspect-ratio: 1;
+  width: 56px;
+  height: 56px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 2rem;
+  font-size: 1.5rem;
   font-weight: 700;
   border: 2px solid var(--ifm-color-emphasis-300);
   border-radius: 4px;
@@ -20,6 +20,7 @@
   transition: background 0.1s, border-color 0.15s;
   user-select: none;
   line-height: 1;
+  padding: 0;
 }
 
 .cell:hover:not(.cellDisabled) {
@@ -53,6 +54,57 @@
   margin-bottom: 1rem;
 }
 
+/* ---- Settings ---- */
+.settingsRow {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.settingLabel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  color: var(--ifm-color-emphasis-700);
+}
+
+.settingLabel span {
+  font-weight: 600;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.select {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8rem;
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-radius: 4px;
+  background: var(--ifm-background-surface-color);
+  color: var(--ifm-font-color-base);
+  cursor: pointer;
+  width: 5.5rem;
+  text-align: center;
+}
+
+.select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.boardInfo {
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--ifm-color-emphasis-500);
+  margin-bottom: 0.5rem;
+}
+
+/* ---- Analysis table ---- */
 .analysisTable {
   width: 100%;
   border-collapse: collapse;
