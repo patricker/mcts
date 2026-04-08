@@ -392,13 +392,24 @@ impl ShiftWasm {
     }
 
     /// Apply a move. Format: "P4" (place at cell 4) or "M0,4" (move from 0 to 4).
+    /// Apply a move. Creates a fresh search tree each time to prevent
+    /// unbounded tree growth (Shift games can cycle indefinitely).
     pub fn apply_move(&mut self, mov: &str) -> bool {
         if let Some(m) = ShiftMove::decode(mov) {
-            if self.manager.advance(&m).is_ok() {
-                return true;
+            let mut state = self.manager.tree().root_state().clone();
+            let legal = state.available_moves();
+            if !legal.contains(&m) {
+                return false;
             }
-            self.manager.playout_n(100);
-            self.manager.advance(&m).is_ok()
+            state.make_move(&m);
+            self.manager = MCTSManager::new(
+                state,
+                ShiftConfig,
+                ShiftEval,
+                UCTPolicy::new(1.4),
+                (),
+            );
+            true
         } else {
             false
         }
