@@ -1,5 +1,8 @@
 # MCTS Crate
 
+> **Wiki**: Run `wiki briefing` for pre-compiled cross-repo context, or `wiki search <term>` to find specific topics. Use the `/wiki` skill for full command reference. Wiki lives at `/home/peter/code/wiki/`.
+
+
 High-performance, lock-free Monte Carlo Tree Search library for Rust.
 Fork of zxqfl/mcts, significantly modernized.
 
