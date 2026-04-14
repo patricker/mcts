@@ -38,6 +38,20 @@ docs/               # Docusaurus 3 site (TypeScript)
 - `cd docs && npm run build` — build docs site
 - `cd docs && npm start` — dev server for docs site
 
+## Releasing to crates.io
+
+Releases are driven by git tags. The `.github/workflows/release.yml` workflow
+triggers on tags matching `<crate>-v<version>`:
+
+1. Bump version in the relevant `Cargo.toml` (core must be bumped before subcrates if they depend on the new version)
+2. Commit: `git commit -am "release: <crate> v<version>"`
+3. Tag: `git tag <crate>-v<version>` (e.g. `treant-v0.4.1`, `treant-gumbel-v0.1.1`)
+4. Push: `git push && git push --tags`
+
+CI will verify the tag matches the Cargo.toml version, run `cargo test -p <crate>`, publish, and create a GitHub Release.
+
+Publish order for multi-crate releases: `treant` first, wait for indexing (~1 min), then `treant-gumbel` / `treant-dynamic` / `treant-wasm` in parallel.
+
 ## Key conventions
 
 - All public API items have rustdoc comments

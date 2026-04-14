@@ -1,0 +1,71 @@
+name: Release to crates.io
+
+on:
+  push:
+    tags:
+      - 'treant-v*'
+      - 'treant-gumbel-v*'
+      - 'treant-dynamic-v*'
+      - 'treant-wasm-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      - name: Parse tag
+        id: parse
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          CRATE="${TAG%-v*}"
+          VERSION="${TAG##*-v}"
+          echo "Tag: $TAG → crate=$CRATE version=$VERSION"
+          echo "crate=$CRATE" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          CRATE="${{ steps.parse.outputs.crate }}"
+          VERSION="${{ steps.parse.outputs.version }}"
+          TOML_VERSION=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r ".packages[] | select(.name == \"$CRATE\") | .version")
+          if [ -z "$TOML_VERSION" ]; then
+            echo "::error::No crate named '$CRATE' found in workspace"
+            exit 1
+          fi
+          if [ "$TOML_VERSION" != "$VERSION" ]; then
+            echo "::error::Tag version $VERSION doesn't match Cargo.toml version $TOML_VERSION for $CRATE"
+            exit 1
+          fi
+          echo "✓ Tag and Cargo.toml both say $CRATE v$VERSION"
+
+      - name: Run tests
+        run: cargo test -p ${{ steps.parse.outputs.crate }}
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p ${{ steps.parse.outputs.crate }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          name: ${{ steps.parse.outputs.crate }} v${{ steps.parse.outputs.version }}
