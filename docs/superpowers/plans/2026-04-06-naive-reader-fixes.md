@@ -98,11 +98,11 @@ Read `docs/docs/intro.md` in full. After the "Learn with real games" section (re
 - **Zero clippy warnings** — strict Rust linting
 - Lock-free parallel search verified on x86-64 with correct Acquire/Release memory ordering
 - Benchmarked: ~250k playouts/sec single-threaded on a simple game (CountingGame), ~40k playouts/sec on Mancala (realistic two-player game)
-- Available on [GitHub](https://github.com/patricker/mcts)
+- Available on [GitHub](https://github.com/patricker/treant)
 
 ### Using from other languages
 
-The core library is Rust, but a **runtime-polymorphic adapter** (`treant-dynamic`) enables language bindings. Games and evaluators are defined via trait objects (`GameCallbacks`, `EvalCallbacks`) using strings for moves — no Rust generics required. Overhead is ~1.4x for realistic games ([benchmarked](https://github.com/patricker/mcts)). WASM bindings power the [Playground](/playground).
+The core library is Rust, but a **runtime-polymorphic adapter** (`treant-dynamic`) enables language bindings. Games and evaluators are defined via trait objects (`GameCallbacks`, `EvalCallbacks`) using strings for moves — no Rust generics required. Overhead is ~1.4x for realistic games ([benchmarked](https://github.com/patricker/treant)). WASM bindings power the [Playground](/playground).
 ```
 
 - [ ] **Step 2: Verify docs build**

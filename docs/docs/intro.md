@@ -33,10 +33,10 @@ The tutorials use simple games to teach concepts, but the [Playground](/playgrou
 - **Zero clippy warnings** — strict Rust linting
 - Lock-free parallel search with correct Acquire/Release memory ordering for ARM
 - Benchmarked: ~250k playouts/sec single-threaded on a trivial game, ~40k playouts/sec on Mancala (realistic two-player)
-- Available on [GitHub](https://github.com/patricker/mcts)
+- Available on [GitHub](https://github.com/patricker/treant)
 
 ### Using from other languages
 
-The core library is Rust, but a **runtime-polymorphic adapter** (`treant-dynamic`) enables language bindings without Rust generics. Games and evaluators are defined via trait objects (`GameCallbacks`, `EvalCallbacks`) using strings for moves. Overhead is ~1.4x for realistic games ([benchmarked](https://github.com/patricker/mcts)). WASM bindings power the [Playground](/playground).
+The core library is Rust, but a **runtime-polymorphic adapter** (`treant-dynamic`) enables language bindings without Rust generics. Games and evaluators are defined via trait objects (`GameCallbacks`, `EvalCallbacks`) using strings for moves. Overhead is ~1.4x for realistic games ([benchmarked](https://github.com/patricker/treant)). WASM bindings power the [Playground](/playground).
 
 A separate **`treant-gumbel`** crate provides [Gumbel MuZero search](/docs/tutorials/08-gumbel-search) -- Sequential Halving with Gumbel noise for monotonically improving policies. It reuses `GameState` from the core crate, so any game works with both standard MCTS and Gumbel search.

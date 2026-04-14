@@ -64,7 +64,7 @@ const config: Config = {
           position: 'left',
         },
         {
-          href: 'https://github.com/patricker/mcts',
+          href: 'https://github.com/patricker/treant',
           label: 'GitHub',
           position: 'right',
         },
@@ -104,7 +104,7 @@ const config: Config = {
           items: [
             {
               label: 'GitHub',
-              href: 'https://github.com/patricker/mcts',
+              href: 'https://github.com/patricker/treant',
             },
           ],
         },
