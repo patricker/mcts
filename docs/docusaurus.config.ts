@@ -31,6 +31,10 @@ const config: Config = {
           remarkPlugins: [[remarkCodeRegion, { rootDir: '..' }]],
         },
         blog: false,
+        gtag: {
+          trackingID: 'G-GP4CNHKDF0',
+          anonymizeIP: true,
+        },
         theme: {
           customCss: './src/css/custom.css',
         },
